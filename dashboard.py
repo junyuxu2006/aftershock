@@ -9,7 +9,7 @@ app = Flask(__name__)
 telemetry = deque(maxlen=240)
 
 telemetry_lock = Lock()
-sensor_status = "Waiting for UNO Q telemetry"
+sensor_status = "Telemetry stream ready"
 
 TABS = {
     "overview": {
@@ -147,7 +147,6 @@ PAGE = """
       font-weight: 600;
     }
     .theme-toggle:hover { background: var(--surface-muted); }
-    .avatar { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--border); border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 700; }
     h1 { margin: 0; font-size: clamp(28px, 4vw, 36px); letter-spacing: -.04em; }
     .description { margin: 9px 0 30px; color: var(--muted); font-size: 16px; line-height: 1.6; }
     .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-bottom: 24px; }
@@ -155,6 +154,10 @@ PAGE = """
     .card { padding: 22px; }
     .card-label { color: var(--muted); font-size: 14px; font-weight: 600; }
     .card-value { margin: 14px 0 5px; font-size: 28px; font-weight: 750; letter-spacing: -.04em; }
+    .magnitude-baseline { color: #087a55; }
+    .magnitude-low { color: #e07a22; }
+    .magnitude-medium { color: #d05a1a; }
+    .magnitude-high { color: #d43d51; }
     .card-note { color: var(--positive); font-size: 13px; font-weight: 600; }
     .panel { padding: 24px; }
     .panel h2 { margin: 0 0 18px; font-size: 18px; }
@@ -173,6 +176,10 @@ PAGE = """
     .control input { width: 78px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); }
     .setting-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid var(--border); font-size: 15px; line-height: 1.6; }
     .setting-row span { color: var(--muted); }
+    .report-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
+    .report-metric { padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+    .report-metric-label { color: var(--muted); font-size: 13px; font-weight: 600; }
+    .report-metric-value { margin-top: 8px; font-size: 24px; font-weight: 750; }
     #map { height: 560px; min-height: 360px; border-radius: 12px; }
     :root[data-theme="dark"] #map .leaflet-tile {
       filter: brightness(.78) invert(1) hue-rotate(180deg) saturate(.7);
@@ -208,9 +215,8 @@ PAGE = """
         <div class="crumb" aria-label="Breadcrumb">Workspace / {{ tab.label }}</div>
         <div class="topbar-actions">
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false">
-            <span aria-hidden="true">[ ]</span><span id="theme-label">Dark mode</span>
+            <span id="theme-label">Dark mode</span>
           </button>
-          <div class="avatar" role="img" aria-label="Jordan Davis profile">JD</div>
         </div>
       </div>
       <h1>{{ tab.title }}</h1>
@@ -219,7 +225,7 @@ PAGE = """
         <div class="cards">
           <div class="card">
             <div class="card-label">Magnitude Tier</div>
-            <div class="card-value" id="card-magnitude">BASELINE</div>
+            <div class="card-value magnitude-baseline" id="card-magnitude">BASELINE</div>
             <div class="card-note" id="card-status">Vector DB Ready</div>
           </div>
           <div class="card">
@@ -237,7 +243,7 @@ PAGE = """
           <div class="plot-toolbar">
             <div>
               <h2 id="plot-title">Seismic Fingerprint & Peak Acceleration</h2>
-              <div class="plot-status" id="plot-status">Waiting for UNO Q embedding stream</div>
+              <div class="plot-status" id="plot-status">Telemetry stream ready</div>
             </div>
             <label class="control" for="threshold-input">
               Threshold
@@ -246,7 +252,7 @@ PAGE = """
           </div>
           <div class="plot-wrap">
             <canvas id="acceleration-plot" aria-label="Peak acceleration plot with magnitude thresholds"></canvas>
-            <div class="plot-empty" id="plot-empty">Waiting for sensor embeddings...</div>
+            <div class="plot-empty" id="plot-empty"></div>
           </div>
           <div class="plot-legend" aria-label="Plot legend">
             <span class="legend-item" style="--legend-color:#5146e5">Peak Acceleration (m/s^2)</span>
@@ -262,10 +268,16 @@ PAGE = """
         </section>
       {% elif active_tab == "reports" %}
         <section class="panel">
-          <h2>Recent reports</h2>
-          <div class="activity"><span>Monthly performance summary</span><span>Oct 15</span></div>
-          <div class="activity"><span>Website traffic overview</span><span>Oct 12</span></div>
-          <div class="activity"><span>Project status report</span><span>Oct 08</span></div>
+          <h2>Live telemetry summary</h2>
+          <p class="description">Summary of the samples currently held in the rolling telemetry buffer.</p>
+          <div class="report-grid">
+            <div class="report-metric"><div class="report-metric-label">Samples in buffer</div><div class="report-metric-value" id="report-samples">0</div></div>
+            <div class="report-metric"><div class="report-metric-label">Detected events</div><div class="report-metric-value" id="report-events">0</div></div>
+            <div class="report-metric"><div class="report-metric-label">Peak acceleration</div><div class="report-metric-value" id="report-peak">0.00 m/s^2</div></div>
+            <div class="report-metric"><div class="report-metric-label">Average RMS</div><div class="report-metric-value" id="report-rms">0.00 m/s^2</div></div>
+            <div class="report-metric"><div class="report-metric-label">Latest magnitude</div><div class="report-metric-value" id="report-magnitude">BASELINE</div></div>
+            <div class="report-metric"><div class="report-metric-label">Stream status</div><div class="report-metric-value" id="report-status">Telemetry stream ready</div></div>
+          </div>
         </section>
       {% elif active_tab == "map" %}
         <section class="panel">
@@ -276,7 +288,6 @@ PAGE = """
         <section class="panel">
           <h2>Preferences</h2>
           <div class="setting-row"><div>Email notifications<br><span>Receive a weekly dashboard summary</span></div><strong>Enabled</strong></div>
-          <div class="setting-row"><div>Display name<br><span>Shown on your workspace profile</span></div><strong>Jordan Davis</strong></div>
         </section>
       {% endif %}
     </main>
@@ -314,6 +325,24 @@ PAGE = """
       let samples = [];
       let usingDemoData = true;
 
+      function updateMagnitudeColor(magnitude) {
+        const normalized = String(magnitude || "BASELINE").toUpperCase();
+        const colorClass = {
+          BASELINE: "magnitude-baseline",
+          CALIBRATING: "magnitude-baseline",
+          LOW: "magnitude-low",
+          MEDIUM: "magnitude-medium",
+          HIGH: "magnitude-high",
+        }[normalized] || "magnitude-baseline";
+        cardMagnitude.classList.remove(
+          "magnitude-baseline",
+          "magnitude-low",
+          "magnitude-medium",
+          "magnitude-high",
+        );
+        cardMagnitude.classList.add(colorClass);
+      }
+
       function drawPlot() {
         const bounds = plot.getBoundingClientRect();
         const scale = window.devicePixelRatio || 1;
@@ -323,6 +352,9 @@ PAGE = """
         context.setTransform(scale, 0, 0, scale, 0, 0);
         const width = bounds.width;
         const height = bounds.height;
+        const margin = { top: 16, right: 16, bottom: 56, left: 58 };
+        const chartWidth = Math.max(1, width - margin.left - margin.right);
+        const chartHeight = Math.max(1, height - margin.top - margin.bottom);
         context.clearRect(0, 0, width, height);
         if (!samples.length) {
           plotEmpty.hidden = false;
@@ -335,25 +367,69 @@ PAGE = """
         const threshold = Number(thresholdInput.value) || 1.8;
         const maximum = Math.max(threshold * 1.25, ...values, ...rmsValues, 6.0);
         const minimum = Math.min(-0.05, ...values);
-        const x = (index) => index * width / Math.max(1, samples.length - 1);
-        const y = (value) => height - (value - minimum) * height / (maximum - minimum);
+        const x = (index) =>
+          margin.left + index * chartWidth / Math.max(1, samples.length - 1);
+        const y = (value) =>
+          margin.top + chartHeight -
+          (value - minimum) * chartHeight / (maximum - minimum);
 
         context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--border");
         context.lineWidth = 1;
         for (let row = 1; row < 4; row++) {
-          const gridY = row * height / 4;
+          const gridY = margin.top + row * chartHeight / 4;
           context.beginPath();
-          context.moveTo(0, gridY);
-          context.lineTo(width, gridY);
+          context.moveTo(margin.left, gridY);
+          context.lineTo(margin.left + chartWidth, gridY);
           context.stroke();
         }
+
+        context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+        context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--muted");
+        context.lineWidth = 1;
+        context.beginPath();
+        const axisY = margin.top + chartHeight;
+        context.moveTo(margin.left, margin.top);
+        context.lineTo(margin.left, margin.top + chartHeight);
+        context.lineTo(margin.left + chartWidth, axisY);
+        context.stroke();
+        context.font = "12px system-ui, sans-serif";
+        context.textAlign = "right";
+        context.textBaseline = "middle";
+        for (let tick = 0; tick <= 4; tick++) {
+          const value = minimum + (maximum - minimum) * (4 - tick) / 4;
+          const tickY = margin.top + tick * chartHeight / 4;
+          context.fillText(value.toFixed(1), margin.left - 8, tickY);
+        }
+        const latestTimestamp = Number(
+          samples[samples.length - 1].timestamp || Date.now() / 1000,
+        );
+        const relativeSeconds = (sample) =>
+          Number(sample.timestamp || latestTimestamp) - latestTimestamp;
+        context.textAlign = "center";
+        context.textBaseline = "top";
+        for (let tick = 0; tick <= 4; tick++) {
+          const index = Math.round(tick * (samples.length - 1) / 4);
+          const seconds = relativeSeconds(samples[index]);
+          const tickX = margin.left + tick * chartWidth / 4;
+          context.beginPath();
+          context.moveTo(tickX, axisY);
+          context.lineTo(tickX, axisY + 6);
+          context.stroke();
+          context.fillText(`${seconds.toFixed(1)}s`, tickX, axisY + 9);
+        }
+        context.fillText("Time relative to latest sample", margin.left + chartWidth / 2, height - 18);
+        context.save();
+        context.translate(16, margin.top + chartHeight / 2);
+        context.rotate(-Math.PI / 2);
+        context.fillText("Acceleration (m/s^2)", 0, 0);
+        context.restore();
 
         // Threshold Line
         context.strokeStyle = "#e07a22";
         context.setLineDash([6, 5]);
         context.beginPath();
-        context.moveTo(0, y(threshold));
-        context.lineTo(width, y(threshold));
+        context.moveTo(margin.left, y(threshold));
+        context.lineTo(margin.left + chartWidth, y(threshold));
         context.stroke();
         context.setLineDash([]);
 
@@ -400,7 +476,7 @@ PAGE = """
           : 0.15 + Math.sin(seconds * 4) * 0.05;
         samples.push({ acceleration, rms: acceleration * 0.4, cosine: 0.94, event });
         samples = samples.slice(-180);
-        plotStatus.textContent = "Demo stream - waiting for UNO Q embeddings";
+        plotStatus.textContent = "Demo stream active";
         drawPlot();
       }
 
@@ -415,15 +491,17 @@ PAGE = """
             const latest = samples[samples.length - 1];
             const eventCount = samples.filter((s) => s.event).length;
 
-            cardMagnitude.textContent = latest.magnitude || "BASELINE";
+            const magnitude = latest.magnitude || "BASELINE";
+            cardMagnitude.textContent = magnitude;
+            updateMagnitudeColor(magnitude);
             cardStatus.textContent = payload.sensor_status || "Vector DB Active";
             cardCosine.textContent = latest.cosine !== undefined ? Number(latest.cosine).toFixed(2) : "0.00";
             cardEvents.textContent = String(eventCount);
             plotStatus.textContent = `${payload.sensor_status} (${payload.samples.length} samples)`;
             drawPlot();
           } else {
-            plotStatus.textContent = payload.sensor_status || "Waiting for telemetry";
-            cardStatus.textContent = payload.sensor_status || "Waiting for telemetry";
+            plotStatus.textContent = payload.sensor_status || "Telemetry stream ready";
+            cardStatus.textContent = payload.sensor_status || "Telemetry stream ready";
           }
         } catch (error) {
           plotStatus.textContent = "Telemetry connection unavailable";
@@ -434,6 +512,42 @@ PAGE = """
       setInterval(readTelemetry, 500);
       setInterval(addDemoSample, 250);
       readTelemetry();
+    </script>
+  {% endif %}
+  {% if active_tab == "reports" %}
+    <script>
+      async function readReportSummary() {
+        try {
+          const response = await fetch("/api/telemetry", { cache: "no-store" });
+          if (!response.ok) throw new Error("Report request failed");
+          const payload = await response.json();
+          const samples = payload.samples || [];
+          const events = samples.filter((sample) => sample.event).length;
+          const peak = samples.reduce(
+            (current, sample) => Math.max(current, Number(sample.acceleration) || 0),
+            0,
+          );
+          const rmsValues = samples
+            .map((sample) => Number(sample.rms))
+            .filter((value) => Number.isFinite(value));
+          const averageRms = rmsValues.length
+            ? rmsValues.reduce((sum, value) => sum + value, 0) / rmsValues.length
+            : 0;
+          const latest = samples[samples.length - 1] || {};
+          document.getElementById("report-samples").textContent = samples.length;
+          document.getElementById("report-events").textContent = events;
+          document.getElementById("report-peak").textContent = `${peak.toFixed(2)} m/s^2`;
+          document.getElementById("report-rms").textContent = `${averageRms.toFixed(2)} m/s^2`;
+          document.getElementById("report-magnitude").textContent = latest.magnitude || "BASELINE";
+          document.getElementById("report-status").textContent =
+            payload.sensor_status || "Telemetry stream ready";
+        } catch (error) {
+          document.getElementById("report-status").textContent = "Report unavailable";
+        }
+      }
+
+      setInterval(readReportSummary, 1000);
+      readReportSummary();
     </script>
   {% endif %}
   {% if active_tab == "map" %}

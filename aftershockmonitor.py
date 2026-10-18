@@ -5,6 +5,7 @@ import json
 import queue
 import threading
 import urllib.request
+import urllib.error
 from collections import deque
 import numpy as np
 from arduino.router_bridge import Bridge
@@ -60,10 +61,16 @@ def dashboard_sender_worker():
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=0.4) as _:
-                pass
-        except Exception:
-            pass
+            with urllib.request.urlopen(req, timeout=0.4) as response:
+                if response.status != 201:
+                    print(
+                        f"Dashboard rejected telemetry: HTTP {response.status} "
+                        f"({DASHBOARD_URL})"
+                    )
+        except urllib.error.HTTPError as error:
+            print(f"Dashboard telemetry HTTP error {error.code}: {DASHBOARD_URL}")
+        except urllib.error.URLError as error:
+            print(f"Dashboard telemetry connection failed: {error.reason}")
         finally:
             telemetry_queue.task_done()
 
@@ -391,7 +398,10 @@ except Exception:
 
 bridge.provide("accel_sample", on_accel_sample)
 
-print(f"Starting Dual-MPU6050 Seismic Fingerprint Monitor ({FREQUENCY_HZ} Hz) -> {DASHBOARD_URL}")
+print(
+    f"Starting Dual-MPU6050 Seismic Fingerprint Monitor "
+    f"({FREQUENCY_HZ} Hz) -> {DASHBOARD_URL}"
+)
 print("Keep sensors still for ~8 seconds to learn the room's baseline embedding.")
 try:
     while True:
