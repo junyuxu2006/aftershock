@@ -92,8 +92,11 @@ def push_to_dashboard(peak_accel, rms_val, cosine_val, mag_label, is_event, stat
 
 
 def set_magnitude_led(magnitude):
+    magnitude = str(magnitude).upper()
+    if magnitude not in {"BASELINE", "LOW", "MEDIUM", "HIGH"}:
+        magnitude = "BASELINE"
     try:
-        led_queue.put_nowait(str(magnitude))
+        led_queue.put_nowait(magnitude)
     except queue.Full:
         try:
             led_queue.get_nowait()
@@ -101,7 +104,7 @@ def set_magnitude_led(magnitude):
         except queue.Empty:
             pass
         try:
-            led_queue.put_nowait(str(magnitude))
+            led_queue.put_nowait(magnitude)
         except queue.Full:
             pass
 

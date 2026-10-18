@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 #include <Arduino_RouterBridge.h>
 
 constexpr uint8_t MPU1_ADDR = 0x68;
@@ -8,8 +9,45 @@ constexpr unsigned long SAMPLE_INTERVAL_MS = 20;
 constexpr uint8_t RGB_RED_PIN = 11;
 constexpr uint8_t RGB_GREEN_PIN = 10;
 constexpr uint8_t RGB_BLUE_PIN = 9;
+constexpr uint8_t LCD_PRIMARY_ADDRESS = 0x27;
+constexpr uint8_t LCD_ALTERNATE_ADDRESS = 0x3F;
+constexpr uint8_t LCD_COLUMNS = 16;
+constexpr uint8_t LCD_ROWS = 2;
 // Set true only when the LED common leg is connected to 3.3V.
 constexpr bool RGB_COMMON_ANODE = false;
+
+LiquidCrystal_I2C lcdPrimary(LCD_PRIMARY_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+LiquidCrystal_I2C lcdAlternate(LCD_ALTERNATE_ADDRESS, LCD_COLUMNS, LCD_ROWS);
+LiquidCrystal_I2C *lcd = nullptr;
+
+bool initLcd() {
+  Wire.beginTransmission(LCD_PRIMARY_ADDRESS);
+  if (Wire.endTransmission() == 0) {
+    lcd = &lcdPrimary;
+  } else {
+    Wire.beginTransmission(LCD_ALTERNATE_ADDRESS);
+    if (Wire.endTransmission() != 0) {
+      return false;
+    }
+    lcd = &lcdAlternate;
+  }
+
+  lcd->init();
+  lcd->backlight();
+  return true;
+}
+
+void showMagnitude(const String &magnitude) {
+  if (lcd == nullptr) {
+    return;
+  }
+
+  lcd->clear();
+  lcd->setCursor(0, 0);
+  lcd->print("Magnitude:");
+  lcd->setCursor(0, 1);
+  lcd->print(magnitude);
+}
 
 void writeRgb(uint8_t red, uint8_t green, uint8_t blue) {
   if (RGB_COMMON_ANODE) {
@@ -65,6 +103,7 @@ bool readMPU(uint8_t address, float &ax, float &ay, float &az) {
 }
 
 bool set_magnitude_led(String magnitude) {
+  static String displayedMagnitude = "";
   uint8_t red = 0;
   uint8_t green = 0;
   uint8_t blue = 0;
@@ -82,6 +121,10 @@ bool set_magnitude_led(String magnitude) {
   }
 
   writeRgb(red, green, blue);
+  if (magnitude != displayedMagnitude) {
+    showMagnitude(magnitude);
+    displayedMagnitude = magnitude;
+  }
   return true;
 }
 
@@ -94,6 +137,12 @@ void setup() {
   Bridge.begin();
   Wire.begin();
   Wire.setClock(400000);
+  if (initLcd()) {
+    showMagnitude("BASELINE");
+    Monitor.println("I2C LCD detected.");
+  } else {
+    Monitor.println("I2C LCD not detected at 0x27 or 0x3F.");
+  }
   pinMode(RGB_RED_PIN, OUTPUT);
   pinMode(RGB_GREEN_PIN, OUTPUT);
   pinMode(RGB_BLUE_PIN, OUTPUT);
