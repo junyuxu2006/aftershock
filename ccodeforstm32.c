@@ -5,6 +5,22 @@
 constexpr uint8_t MPU1_ADDR = 0x68;
 constexpr uint8_t MPU2_ADDR = 0x69;
 constexpr unsigned long SAMPLE_INTERVAL_MS = 20;
+constexpr uint8_t RGB_RED_PIN = 11;
+constexpr uint8_t RGB_GREEN_PIN = 10;
+constexpr uint8_t RGB_BLUE_PIN = 9;
+// Set true only when the LED common leg is connected to 3.3V.
+constexpr bool RGB_COMMON_ANODE = false;
+
+void writeRgb(uint8_t red, uint8_t green, uint8_t blue) {
+  if (RGB_COMMON_ANODE) {
+    red = 255 - red;
+    green = 255 - green;
+    blue = 255 - blue;
+  }
+  analogWrite(RGB_RED_PIN, red);
+  analogWrite(RGB_GREEN_PIN, green);
+  analogWrite(RGB_BLUE_PIN, blue);
+}
 
 void writeMPURegister(uint8_t address, uint8_t reg, uint8_t value) {
   Wire.beginTransmission(address);
@@ -65,22 +81,23 @@ bool set_magnitude_led(String magnitude) {
     green = 255;
   }
 
-  rgbLedWrite(RGB_BUILTIN, red, green, blue);
+  writeRgb(red, green, blue);
   return true;
 }
 
 bool trigger_alert(bool active) {
-  set_magnitude_led(active ? "HIGH" : "BASELINE");
   return active;
 }
 
 void setup() {
+  Monitor.begin(115200);
   Bridge.begin();
   Wire.begin();
   Wire.setClock(400000);
-  Monitor.begin(115200);
-  pinMode(LED_BUILTIN, OUTPUT);
-  rgbLedWrite(RGB_BUILTIN, 0, 255, 0);
+  pinMode(RGB_RED_PIN, OUTPUT);
+  pinMode(RGB_GREEN_PIN, OUTPUT);
+  pinMode(RGB_BLUE_PIN, OUTPUT);
+  writeRgb(0, 255, 0);
 
   Bridge.provide_safe("trigger_alert", trigger_alert);
   Bridge.provide_safe("set_magnitude_led", set_magnitude_led);

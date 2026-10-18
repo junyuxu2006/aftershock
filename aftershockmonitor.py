@@ -12,6 +12,7 @@ from arduino.router_bridge import Bridge
 # Dashboard Endpoint Configuration
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://127.0.0.1:5000/api/telemetry")
 telemetry_queue = queue.Queue(maxsize=100)
+led_queue = queue.Queue(maxsize=1)
 
 # Sampling & Window Configuration
 FREQUENCY_HZ = 50
@@ -22,6 +23,10 @@ STRIDE_SAMPLES = 5          # Run embedding search every 5 samples (10 Hz)
 CALIBRATION_WINDOWS = 80    # ~8 seconds of ambient baseline calibration
 REQUIRED_ANOMALY_PERCENT = 50
 TRACKING_WINDOW_SEC = 5.0
+LOW_RMS_LIMIT = 0.45
+MEDIUM_RMS_LIMIT = 1.20
+LOW_PEAK_LIMIT = 1.80
+MEDIUM_PEAK_LIMIT = 3.80
 
 # Sliding buffers storing (ax, ay, az) tuples for both sensors
 buffer_mpu1 = deque(maxlen=WINDOW_SAMPLES)
@@ -81,9 +86,31 @@ def push_to_dashboard(peak_accel, rms_val, cosine_val, mag_label, is_event, stat
 
 def set_magnitude_led(magnitude):
     try:
-        bridge.call("set_magnitude_led", str(magnitude))
-    except Exception as error:
-        print(f"Error setting RGB LED: {error}")
+        led_queue.put_nowait(str(magnitude))
+    except queue.Full:
+        try:
+            led_queue.get_nowait()
+            led_queue.task_done()
+        except queue.Empty:
+            pass
+        try:
+            led_queue.put_nowait(str(magnitude))
+        except queue.Full:
+            pass
+
+
+def led_worker():
+    while True:
+        magnitude = led_queue.get()
+        if magnitude is None:
+            led_queue.task_done()
+            return
+        try:
+            bridge.call("set_magnitude_led", magnitude)
+        except Exception as error:
+            print(f"Error setting RGB LED: {error}")
+        finally:
+            led_queue.task_done()
 
 
 sender_thread = threading.Thread(target=dashboard_sender_worker, daemon=True)
@@ -91,6 +118,8 @@ sender_thread.start()
 
 bridge = Bridge()
 bridge.connect()
+led_thread = threading.Thread(target=led_worker, daemon=True)
+led_thread.start()
 
 
 def extract_sensor_stats(window_tuples):
@@ -213,8 +242,10 @@ def query_embedding_space(shape_unit_emb, energy_emb, meta):
     peak = meta["peak"]
     rms = meta["rms"]
 
-    # 1. Dead-still noise gate
-    if peak < baseline_noise_floor and rms < 0.08:
+    # 1. Dead-still noise gate. Keep the learned baseline in the decision so
+    # small movements do not get forced into an anomaly tier.
+    baseline_rms = max(float(magnitude_centroids["BASELINE"][1]), 0.08)
+    if peak < max(baseline_noise_floor, 0.28) and rms < baseline_rms * 2.5:
         return "BASELINE", "QUIET", 1.0, 0.0
 
     # 2. Cosine Similarity for Waveform Signature (Dot product of L2-normalized vectors)
@@ -222,26 +253,19 @@ def query_embedding_space(shape_unit_emb, energy_emb, meta):
     sim_impact = float(np.dot(shape_unit_emb, shape_prototypes["IMPACT_KNOCK"]))
     wave_type = "SEISMIC" if sim_seismic >= sim_impact else "IMPACT"
 
-    # 3. Magnitude Classification via Inverse-Distance Softmax in Energy Embedding Space
-    weights = np.array([1.5, 1.2, 1.0, 0.5, 0.8])  # Feature importance weights
-    distances = {}
-    for label, centroid in magnitude_centroids.items():
-        diff = (energy_emb - centroid) * weights
-        distances[label] = float(np.linalg.norm(diff))
+    # 3. Use physical energy bands for magnitude. RMS is the primary measure
+    # so one short spike cannot turn a small shake into a HIGH event.
+    if rms < LOW_RMS_LIMIT and peak < LOW_PEAK_LIMIT:
+        mag_label = "LOW"
+        limit = LOW_RMS_LIMIT
+    elif rms < MEDIUM_RMS_LIMIT and peak < MEDIUM_PEAK_LIMIT:
+        mag_label = "MEDIUM"
+        limit = MEDIUM_RMS_LIMIT
+    else:
+        mag_label = "HIGH"
+        limit = MEDIUM_RMS_LIMIT
 
-    # Convert embedding distances into similarity confidence scores
-    inv_dists = {k: 1.0 / (d + 0.15) ** 2 for k, d in distances.items()}
-    total_inv = sum(inv_dists.values())
-    probs = {k: v / total_inv for k, v in inv_dists.items()}
-
-    # Select closest magnitude cluster
-    mag_label = max(["LOW", "MEDIUM", "HIGH"], key=lambda k: probs[k])
-    confidence = float(probs[mag_label] / (1.0 - probs["BASELINE"] + 1e-6))
-
-    # Self-Adapting Centroid Update (Online Learning):
-    # Slowly nudge the winning magnitude centroid (2% learning rate) toward real observed shakes
-    alpha = 0.02
-    magnitude_centroids[mag_label] = (1.0 - alpha) * magnitude_centroids[mag_label] + alpha * energy_emb
+    confidence = min(max(rms / max(limit, 1e-6), 0.0), 0.99)
 
     return mag_label, wave_type, min(confidence, 0.99), sim_seismic
 
@@ -271,14 +295,17 @@ def on_accel_sample(ax1, ay1, az1, ax2, ay2, az2):
         collected = len(baseline_energy_samples)
 
         push_to_dashboard(
-        peak_accel=meta["peak"],
-        rms_val=meta["rms"],
-        cosine_val=0.0,
-        mag_label="CALIBRATING",
-        is_event=False,
-        status_text=f"Learning Baseline Embedding ({collected}/{CALIBRATION_WINDOWS})",
-    )
-    set_magnitude_led("BASELINE")
+            peak_accel=meta["peak"],
+            rms_val=meta["rms"],
+            cosine_val=0.0,
+            mag_label="CALIBRATING",
+            is_event=False,
+            status_text=(
+                f"Learning Baseline Embedding "
+                f"({collected}/{CALIBRATION_WINDOWS})"
+            ),
+        )
+        set_magnitude_led("BASELINE")
 
         if collected % 20 == 0 or collected == CALIBRATION_WINDOWS:
             print(f"[Embedding Calibration] Sampling ambient room vector... "
@@ -372,6 +399,8 @@ try:
 except KeyboardInterrupt:
     print("\nStopping seismic monitor...")
 finally:
+    led_queue.put(None)
+    led_thread.join(timeout=1.0)
     try:
         bridge.unprovide("accel_sample")
     except Exception:
