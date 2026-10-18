@@ -15,7 +15,6 @@ TABS = {
     "overview": {"label": "Overview", "title": "Overview", "description": "Dual Machine Learning Seismic Authority: Physical Cosine Similarity & Digital Fragility Engine."},
     "analytics": {"label": "Analytics", "title": "Analytics", "description": "Explore embedding similarity metrics and magnitude tiers."},
     "reports": {"label": "Reports", "title": "Reports", "description": "Your latest seismic event reports are collected here."},
-    "map": {"label": "Map", "title": "Map", "description": "Explore locations around the world."},
     "settings": {"label": "Settings", "title": "Settings", "description": "Manage your dashboard preferences."},
 }
 
