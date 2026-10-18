@@ -9,6 +9,10 @@ constexpr unsigned long SAMPLE_INTERVAL_MS = 20;
 constexpr uint8_t RGB_RED_PIN = 11;
 constexpr uint8_t RGB_GREEN_PIN = 10;
 constexpr uint8_t RGB_BLUE_PIN = 9;
+constexpr uint8_t BUZZER_PIN = 7;
+constexpr unsigned long BUZZER_HOLD_MS = 10000;
+constexpr unsigned long BUZZER_BEEP_ON_MS = 150;
+constexpr unsigned long BUZZER_BEEP_OFF_MS = 500;
 constexpr uint8_t LCD_PRIMARY_ADDRESS = 0x27;
 constexpr uint8_t LCD_ALTERNATE_ADDRESS = 0x3F;
 constexpr uint8_t LCD_COLUMNS = 16;
@@ -19,6 +23,9 @@ constexpr bool RGB_COMMON_ANODE = false;
 LiquidCrystal_I2C lcdPrimary(LCD_PRIMARY_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 LiquidCrystal_I2C lcdAlternate(LCD_ALTERNATE_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 LiquidCrystal_I2C *lcd = nullptr;
+unsigned long buzzerActiveUntil = 0;
+unsigned long buzzerLastToggle = 0;
+bool buzzerOn = false;
 
 bool initLcd() {
   Wire.beginTransmission(LCD_PRIMARY_ADDRESS);
@@ -42,11 +49,20 @@ void showMagnitude(const String &magnitude) {
     return;
   }
 
+  auto printCentered = [](const String &text) {
+    const uint8_t textLength = min(static_cast<uint8_t>(text.length()), LCD_COLUMNS);
+    const uint8_t leftPadding = (LCD_COLUMNS - textLength) / 2;
+    for (uint8_t index = 0; index < leftPadding; ++index) {
+      lcd->print(' ');
+    }
+    lcd->print(text.substring(0, textLength));
+  };
+
   lcd->clear();
   lcd->setCursor(0, 0);
-  lcd->print("Magnitude:");
+  printCentered("Magnitude:");
   lcd->setCursor(0, 1);
-  lcd->print(magnitude);
+  printCentered(magnitude);
 }
 
 void writeRgb(uint8_t red, uint8_t green, uint8_t blue) {
@@ -121,6 +137,16 @@ bool set_magnitude_led(String magnitude) {
   }
 
   writeRgb(red, green, blue);
+  if (magnitude == "HIGH") {
+    buzzerActiveUntil = millis() + BUZZER_HOLD_MS;
+    buzzerOn = true;
+    buzzerLastToggle = millis();
+    digitalWrite(BUZZER_PIN, HIGH);
+  } else {
+    buzzerActiveUntil = 0;
+    buzzerOn = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  }
   if (magnitude != displayedMagnitude) {
     showMagnitude(magnitude);
     displayedMagnitude = magnitude;
@@ -138,14 +164,26 @@ void setup() {
   Wire.begin();
   Wire.setClock(400000);
   if (initLcd()) {
-    showMagnitude("BASELINE");
+    lcd->clear();
+    lcd->setCursor(0, 0);
+    const String detectedText = "I2C LCD detected";
+    lcd->setCursor((LCD_COLUMNS - detectedText.length()) / 2, 0);
+    lcd->print(detectedText);
+    lcd->setCursor(0, 1);
+    const String initializingText = "Initializing...";
+    lcd->setCursor((LCD_COLUMNS - initializingText.length()) / 2, 1);
+    lcd->print(initializingText);
     Monitor.println("I2C LCD detected.");
+    delay(1500);
+    showMagnitude("BASELINE");
   } else {
     Monitor.println("I2C LCD not detected at 0x27 or 0x3F.");
   }
   pinMode(RGB_RED_PIN, OUTPUT);
   pinMode(RGB_GREEN_PIN, OUTPUT);
   pinMode(RGB_BLUE_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   writeRgb(0, 255, 0);
 
   Bridge.provide_safe("trigger_alert", trigger_alert);
@@ -164,6 +202,18 @@ void setup() {
 void loop() {
   static unsigned long lastSample = 0;
   const unsigned long now = millis();
+  if (buzzerActiveUntil != 0 &&
+      static_cast<long>(now - buzzerActiveUntil) >= 0) {
+    buzzerActiveUntil = 0;
+    buzzerOn = false;
+    digitalWrite(BUZZER_PIN, LOW);
+  } else if (buzzerActiveUntil != 0 &&
+             now - buzzerLastToggle >=
+                 (buzzerOn ? BUZZER_BEEP_ON_MS : BUZZER_BEEP_OFF_MS)) {
+    buzzerLastToggle = now;
+    buzzerOn = !buzzerOn;
+    digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+  }
   if (now - lastSample < SAMPLE_INTERVAL_MS) {
     return;
   }
