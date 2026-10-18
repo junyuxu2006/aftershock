@@ -1,6 +1,12 @@
-from flask import Flask, abort, render_template_string
+from collections import deque
+from threading import Lock
+from time import time
+
+from flask import Flask, abort, jsonify, render_template_string, request
 
 app = Flask(__name__)
+telemetry = deque(maxlen=240)
+telemetry_lock = Lock()
 
 TABS = {
     "overview": {
@@ -152,6 +158,16 @@ PAGE = """
     .activity { display: grid; grid-template-columns: 1fr auto; gap: 14px; padding: 15px 0; border-top: 1px solid var(--border); font-size: 15px; line-height: 1.5; }
     .activity span:last-child { color: var(--muted); font-size: 14px; }
     .placeholder { padding: 32px; color: var(--muted); line-height: 1.7; }
+    .plot-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; }
+    .plot-status { color: var(--muted); font-size: 13px; }
+    .plot-wrap { position: relative; height: 360px; }
+    #acceleration-plot { display: block; width: 100%; height: 100%; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+    .plot-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .legend-item::before { display: inline-block; width: 18px; height: 3px; margin: 0 7px 3px 0; border-radius: 2px; content: ""; background: var(--legend-color); }
+    .legend-event::before { width: 9px; height: 9px; margin-bottom: 0; border-radius: 50%; }
+    .plot-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); pointer-events: none; }
+    .control { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+    .control input { width: 78px; padding: 7px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); }
     .setting-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 0; border-top: 1px solid var(--border); font-size: 15px; line-height: 1.6; }
     .setting-row span { color: var(--muted); }
     #map { height: 560px; min-height: 360px; border-radius: 12px; }
@@ -204,16 +220,26 @@ PAGE = """
       <h1>{{ tab.title }}</h1>
       <p class="description">{{ tab.description }}</p>
       {% if active_tab == "overview" %}
-        <section class="cards" aria-label="Key metrics">
-          <article class="card"><div class="card-label">Total visitors</div><div class="card-value">12,486</div><div class="card-note">↑ 8.2% this month</div></article>
-          <article class="card"><div class="card-label">Active projects</div><div class="card-value">24</div><div class="card-note">↑ 3 added this week</div></article>
-          <article class="card"><div class="card-label">Completion rate</div><div class="card-value">82%</div><div class="card-note">↑ 4.6% this month</div></article>
-        </section>
-        <section class="panel">
-          <h2>Recent activity</h2>
-          <div class="activity"><span>Website redesign moved to review</span><span>10 min ago</span></div>
-          <div class="activity"><span>Monthly report was generated</span><span>2 hours ago</span></div>
-          <div class="activity"><span>New team member joined</span><span>Yesterday</span></div>
+        <section class="panel" aria-labelledby="plot-title">
+          <div class="plot-toolbar">
+            <div>
+              <h2 id="plot-title">Acceleration monitor</h2>
+              <div class="plot-status" id="plot-status">Waiting for UNO Q telemetry</div>
+            </div>
+            <label class="control" for="threshold-input">
+              Threshold (g)
+              <input id="threshold-input" type="number" min="0.01" max="100" step="0.01" value="1.50">
+            </label>
+          </div>
+          <div class="plot-wrap">
+            <canvas id="acceleration-plot" aria-label="Acceleration plot with detection threshold and event markers"></canvas>
+            <div class="plot-empty" id="plot-empty">Waiting for acceleration samples...</div>
+          </div>
+          <div class="plot-legend" aria-label="Plot legend">
+            <span class="legend-item" style="--legend-color:#5146e5">Acceleration</span>
+            <span class="legend-item" style="--legend-color:#e07a22">Detection threshold</span>
+            <span class="legend-item legend-event" style="--legend-color:#d43d51">Detected event</span>
+          </div>
         </section>
       {% elif active_tab == "analytics" %}
         <section class="panel placeholder">
@@ -260,6 +286,116 @@ PAGE = """
       updateThemeButton();
     });
   </script>
+  {% if active_tab == "overview" %}
+    <script>
+      const plot = document.getElementById("acceleration-plot");
+      const plotEmpty = document.getElementById("plot-empty");
+      const plotStatus = document.getElementById("plot-status");
+      const thresholdInput = document.getElementById("threshold-input");
+      let samples = [];
+      let usingDemoData = true;
+
+      function drawPlot() {
+        const bounds = plot.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        plot.width = Math.max(1, Math.floor(bounds.width * scale));
+        plot.height = Math.max(1, Math.floor(bounds.height * scale));
+        const context = plot.getContext("2d");
+        context.setTransform(scale, 0, 0, scale, 0, 0);
+        const width = bounds.width;
+        const height = bounds.height;
+        context.clearRect(0, 0, width, height);
+        if (!samples.length) {
+          plotEmpty.hidden = false;
+          return;
+        }
+        plotEmpty.hidden = true;
+
+        const values = samples.map((sample) => sample.acceleration);
+        const threshold = Number(thresholdInput.value) || 1.5;
+        const maximum = Math.max(threshold * 1.15, ...values, 0.1);
+        const minimum = Math.min(-0.1, ...values);
+        const x = (index) => index * width / Math.max(1, samples.length - 1);
+        const y = (value) => height - (value - minimum) * height / (maximum - minimum);
+
+        context.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--border");
+        context.lineWidth = 1;
+        for (let row = 1; row < 4; row++) {
+          const gridY = row * height / 4;
+          context.beginPath();
+          context.moveTo(0, gridY);
+          context.lineTo(width, gridY);
+          context.stroke();
+        }
+
+        context.strokeStyle = "#e07a22";
+        context.setLineDash([6, 5]);
+        context.beginPath();
+        context.moveTo(0, y(threshold));
+        context.lineTo(width, y(threshold));
+        context.stroke();
+        context.setLineDash([]);
+
+        context.strokeStyle = "#5146e5";
+        context.lineWidth = 2;
+        context.beginPath();
+        samples.forEach((sample, index) => {
+          const pointX = x(index);
+          const pointY = y(sample.acceleration);
+          index ? context.lineTo(pointX, pointY) : context.moveTo(pointX, pointY);
+        });
+        context.stroke();
+
+        context.fillStyle = "#d43d51";
+        samples.forEach((sample, index) => {
+          if (!sample.event) return;
+          context.beginPath();
+          context.arc(x(index), y(sample.acceleration), 4, 0, Math.PI * 2);
+          context.fill();
+        });
+      }
+
+      function addDemoSample() {
+        if (!usingDemoData) return;
+        const seconds = Date.now() / 1000;
+        const event = Math.sin(seconds / 8) > 0.96;
+        const acceleration = event
+          ? 1.9 + Math.sin(seconds * 16) * 0.35
+          : 0.25 + Math.sin(seconds * 4) * 0.08;
+        samples.push({ acceleration, event });
+        samples = samples.slice(-180);
+        usingDemoData = true;
+        plotStatus.textContent = "Demo stream — waiting for UNO Q telemetry";
+        drawPlot();
+      }
+
+      async function readTelemetry() {
+        try {
+          const response = await fetch("/api/telemetry", { cache: "no-store" });
+          if (!response.ok) throw new Error("Telemetry request failed");
+          const payload = await response.json();
+          if (payload.samples.length) {
+            samples = payload.samples;
+            usingDemoData = false;
+            plotStatus.textContent = `UNO Q connected — ${payload.samples.length} samples`;
+            drawPlot();
+          } else if (!usingDemoData) {
+            plotStatus.textContent = "Waiting for UNO Q telemetry";
+          }
+        } catch (error) {
+          plotStatus.textContent = "Telemetry connection unavailable";
+        }
+      }
+
+      thresholdInput.addEventListener("input", drawPlot);
+      window.addEventListener("resize", drawPlot);
+      setInterval(() => {
+        if (!usingDemoData) readTelemetry();
+      }, 1000);
+      setInterval(addDemoSample, 250);
+      readTelemetry();
+    </script>
+  {% endif %}
   {% if active_tab == "map" %}
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
@@ -293,6 +429,44 @@ def show_tab(tab_name):
         active_tab=tab_name,
         tab=tab,
     )
+
+
+@app.get("/api/telemetry")
+def get_telemetry():
+    with telemetry_lock:
+        samples = list(telemetry)
+    return jsonify({"samples": samples})
+
+
+@app.post("/api/telemetry")
+def add_telemetry():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+
+    try:
+        acceleration = float(payload["acceleration"])
+        threshold = float(payload.get("threshold", 1.5))
+        event = bool(payload.get("event", acceleration >= threshold))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({
+            "error": "acceleration is required and must be numeric; threshold must be numeric",
+        }), 400
+
+    if not all(map(lambda value: value == value and abs(value) != float("inf"), (acceleration, threshold))):
+        return jsonify({"error": "acceleration and threshold must be finite"}), 400
+    if threshold <= 0:
+        return jsonify({"error": "threshold must be greater than zero"}), 400
+
+    sample = {
+        "timestamp": time(),
+        "acceleration": acceleration,
+        "threshold": threshold,
+        "event": event,
+    }
+    with telemetry_lock:
+        telemetry.append(sample)
+    return jsonify(sample), 201
 
 
 if __name__ == "__main__":

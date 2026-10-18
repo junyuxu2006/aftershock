@@ -1,113 +1,181 @@
-#include <Your_Earthquake_Project_Inferencing.h> // Replace with your actual Edge Impulse header
-// #include <Adafruit_MPU6050.h>                 // Uncomment if using a standard MPU6050 sensor
+/*
+ * Debian/Linux standalone aftershock monitor.
+ *
+ * Build:
+ *   g++ -std=c++17 -O2 -Wall -Wextra -pedantic ml.cpp -o aftershock_ml
+ *
+ * The sensor and model hooks below are deliberately self-contained so the
+ * program can be run on a Debian UNO Q without Arduino headers. Replace
+ * getAccelerometerData() and runInference() with the real sensor/model
+ * integration when those components are available.
+ */
 
-// --- Hardware & ML Configuration ---
-#define FREQUENCY_HZ        50      // Match the sampling frequency your ML model was trained on
-#define INTERVAL_MS         (1000 / FREQUENCY_HZ) 
-#define EI_CLASSIFIER_NN_INPUT_FRAME_SIZE  (EI_CLASSIFIER_RAW_SAMPLE_COUNT) // Total buffer size (e.g., 3 axes * 100 samples)
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <random>
+#include <string_view>
+#include <thread>
 
-// --- Sustained Event Logic Parameters ---
-const float ANOMALY_THRESHOLD = 0.35;        // Adjust based on your Edge Impulse testing
-const unsigned long TRACKING_WINDOW_MS = 5000; // Look at a rolling 5-second window
-const int REQUIRED_ANOMALY_PERCENT = 70;     // Event triggers if >70% of windows are abnormal
+namespace {
 
-// --- Global Buffers & States ---
-float featuresBuffer[EI_CLASSIFIER_NN_INPUT_FRAME_SIZE];
-int bufferIndex = 0;
-unsigned long lastSampleTime = 0;
+constexpr int FREQUENCY_HZ = 50;
+constexpr int INTERVAL_MS = 1000 / FREQUENCY_HZ;
+constexpr std::size_t AXES = 3;
+constexpr std::size_t SAMPLE_COUNT = 100;
+constexpr std::size_t FRAME_SIZE = AXES * SAMPLE_COUNT;
 
-// Temporal tracking variables
-unsigned long trackingWindowStart = 0;
-int totalInferencesInWindow = 0;
-int anomalyCountInWindow = 0;
+constexpr float ANOMALY_THRESHOLD = 0.35F;
+constexpr std::chrono::milliseconds TRACKING_WINDOW{5000};
+constexpr int REQUIRED_ANOMALY_PERCENT = 70;
 
-// Simulated or Real Sensor Hook
-void getAccelerometerData(float *x, float *y, float *z) {
-    // REPLACE with your real sensor reading, e.g.:
-    // sensors_event_t a, g, temp;
-    // mpu.getEvent(&a, &g, &temp);
-    // *x = a.acceleration.x; *y = a.acceleration.y; *z = a.acceleration.z;
-    
-    // Fallback simulation (Static baseline)
-    *x = 0.00 + ((float)random(-5, 5) / 100.0); 
-    *y = 0.00 + ((float)random(-5, 5) / 100.0);
-    *z = 9.81 + ((float)random(-5, 5) / 100.0); // Gravity baseline
+volatile std::sig_atomic_t running = 1;
+
+struct Acceleration {
+    float x;
+    float y;
+    float z;
+};
+
+void stopMonitor(int) {
+    running = 0;
 }
 
-void setup() {
-    Serial.begin(115200);
-    while (!Serial);
-    Serial.println("地震/Aftershock Monitor Initialized. Gathering baseline...");
-    
-    trackingWindowStart = millis();
+class SensorSimulator {
+public:
+    explicit SensorSimulator(bool eventMode)
+        : eventMode_(eventMode), noise_(-0.05F, 0.05F), random_(std::random_device{}()) {}
+
+    Acceleration read() {
+        const bool eventSample = eventMode_ && (sampleNumber_ % FREQUENCY_HZ < FREQUENCY_HZ / 2);
+        ++sampleNumber_;
+        const float vibration = eventSample ? 2.0F : 0.0F;
+        return {noise_(random_) + vibration, noise_(random_) + vibration,
+                9.81F + noise_(random_)};
+    }
+
+private:
+    bool eventMode_;
+    std::size_t sampleNumber_ = 0;
+    std::uniform_real_distribution<float> noise_;
+    std::mt19937 random_;
+};
+
+// Replace this with the deployed ML model call. The score is normalized to
+// the same [0, 1] range used by the original Edge Impulse implementation.
+float runInference(const float* features, std::size_t featureCount) {
+    float score = 0.0F;
+    for (std::size_t index = 0; index + 2 < featureCount; index += AXES) {
+        const float horizontalAcceleration =
+            std::hypot(features[index], features[index + 1]);
+        score = std::max(score, std::min(horizontalAcceleration / 4.0F, 1.0F));
+    }
+    return score;
 }
 
-void loop() {
-    unsigned long currentTime = millis();
+void printAlert(int density) {
+    std::cout << "ALERT: Sustained aftershock / seismic event confirmed "
+              << "(density: " << density << "%)\n";
+}
 
-    // 1. Maintain strict sampling rate to feed the time-series window
-    if (currentTime - lastSampleTime >= INTERVAL_MS) {
-        lastSampleTime = currentTime;
+int parseDuration(int argc, char* argv[]) {
+    for (int index = 1; index + 1 < argc; ++index) {
+        if (std::string_view(argv[index]) == "--seconds") {
+            const int seconds = std::atoi(argv[index + 1]);
+            return std::max(seconds, 0);
+        }
+    }
+    return 0;
+}
 
-        float ax, ay, az;
-        getAccelerometerData(&ax, &ay, &az);
+bool hasArgument(int argc, char* argv[], std::string_view argument) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == argument) {
+            return true;
+        }
+    }
+    return false;
+}
 
-        // Fill the rolling buffer sequentially: X, Y, Z, X, Y, Z...
-        featuresBuffer[bufferIndex++] = ax;
-        featuresBuffer[bufferIndex++] = ay;
-        featuresBuffer[bufferIndex++] = az;
+}  // namespace
 
-        // 2. Once the buffer window is completely full, run ML analysis
-        if (bufferIndex >= EI_CLASSIFIER_NN_INPUT_FRAME_SIZE) {
-            
-            // Map buffer to Edge Impulse signal format
-            signal_t signal;
-            numpy::signal_from_buffer(featuresBuffer, EI_CLASSIFIER_NN_INPUT_FRAME_SIZE, &signal);
+int main(int argc, char* argv[]) {
+    const int durationSeconds = parseDuration(argc, argv);
+    const bool eventMode = hasArgument(argc, argv, "--event");
+    const auto startTime = std::chrono::steady_clock::now();
 
-            // Run Inference
-            ei_impulse_result_t result = { 0 };
-            EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
-            
-            if (res == EI_IMPULSE_OK) {
-                float anomalyScore = result.anomaly;
-                totalInferencesInWindow++;
+    std::signal(SIGINT, stopMonitor);
+    std::signal(SIGTERM, stopMonitor);
 
+    float featuresBuffer[FRAME_SIZE]{};
+    std::size_t bufferIndex = 0;
+    auto nextSample = std::chrono::steady_clock::now();
+    auto trackingWindowStart = nextSample;
+    int totalInferencesInWindow = 0;
+    int anomalyCountInWindow = 0;
+    SensorSimulator sensor(eventMode);
+
+    std::cout << "Aftershock monitor started at " << FREQUENCY_HZ
+              << " Hz. Press Ctrl-C to stop.\n";
+    if (eventMode) {
+        std::cout << "Event simulation enabled.\n";
+    }
+
+    while (running != 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextSample) {
+            nextSample += std::chrono::milliseconds(INTERVAL_MS);
+            const Acceleration acceleration = sensor.read();
+
+            if (bufferIndex + AXES <= FRAME_SIZE) {
+                featuresBuffer[bufferIndex++] = acceleration.x;
+                featuresBuffer[bufferIndex++] = acceleration.y;
+                featuresBuffer[bufferIndex++] = acceleration.z;
+            }
+
+            if (bufferIndex == FRAME_SIZE) {
+                const float anomalyScore = runInference(featuresBuffer, FRAME_SIZE);
+                ++totalInferencesInWindow;
                 if (anomalyScore > ANOMALY_THRESHOLD) {
-                    anomalyCountInWindow++;
-                    Serial.print("⚠️ Localized Anomaly Detected! Score: "); Serial.println(anomalyScore);
+                    ++anomalyCountInWindow;
+                    std::cout << "Anomaly detected. Score: " << anomalyScore << '\n';
+                }
+
+                constexpr std::size_t shiftAmount = AXES;
+                std::memmove(featuresBuffer, featuresBuffer + shiftAmount,
+                             (FRAME_SIZE - shiftAmount) * sizeof(float));
+                bufferIndex = FRAME_SIZE - shiftAmount;
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        const auto windowNow = std::chrono::steady_clock::now();
+        if (windowNow - trackingWindowStart >= TRACKING_WINDOW) {
+            if (totalInferencesInWindow > 0) {
+                const int anomalyPercentage =
+                    (anomalyCountInWindow * 100) / totalInferencesInWindow;
+                std::cout << "Window report: anomaly density " << anomalyPercentage << "%\n";
+                if (anomalyPercentage >= REQUIRED_ANOMALY_PERCENT) {
+                    printAlert(anomalyPercentage);
                 }
             }
+            trackingWindowStart = windowNow;
+            totalInferencesInWindow = 0;
+            anomalyCountInWindow = 0;
+        }
 
-            // Shift the buffer backward (Sliding window logic) 
-            // Instead of wiping the buffer to 0, we drop the oldest sample to react faster
-            int shiftAmount = 3; // Shift by 1 full X/Y/Z triplet
-            memmove(featuresBuffer, &featuresBuffer[shiftAmount], (EI_CLASSIFIER_NN_INPUT_FRAME_SIZE - shiftAmount) * sizeof(float));
-            bufferIndex = EI_CLASSIFIER_NN_INPUT_FRAME_SIZE - shiftAmount;
+        if (durationSeconds > 0 &&
+            windowNow - startTime >= std::chrono::seconds(durationSeconds)) {
+            running = 0;
         }
     }
 
-    // 3. Evaluate the temporal window to confirm a "Sustained" Event
-    if (currentTime - trackingWindowStart >= TRACKING_WINDOW_MS) {
-        if (totalInferencesInWindow > 0) {
-            int anomalyPercentage = (anomalyCountInWindow * 100) / totalInferencesInWindow;
-            
-            Serial.print("[Window Report] Anomaly Density: "); Serial.print(anomalyPercentage); Serial.println("%");
-
-            if (anomalyPercentage >= REQUIRED_ANOMALY_PERCENT) {
-                triggerSustainedAftershockAlert(anomalyPercentage);
-            }
-        }
-
-        // Reset temporal evaluation variables for the next period
-        trackingWindowStart = currentTime;
-        totalInferencesInWindow = 0;
-        anomalyCountInWindow = 0;
-    }
-}
-
-void triggerSustainedAftershockAlert(int density) {
-    Serial.print("🚨 ALERT: Sustained aftershock / seismic event confirmed! (Density: ");
-    Serial.print(density);
-    Serial.println("%) Shutting down critical systems...");
-    // Action items: Open automated emergency doors, cut main gas valves, trigger sirens.
+    std::cout << "Aftershock monitor stopped.\n";
+    return 0;
 }
