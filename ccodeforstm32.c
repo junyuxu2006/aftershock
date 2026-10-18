@@ -1,42 +1,36 @@
-#include <Arduino.h>
-#include <RPC.h>
+#include <Arduino_RouterBridge.h>
+
+// Linux side calls: Bridge.call("set_led", true)
+bool set_led(bool on) {
+  digitalWrite(LED_BUILTIN, on ? HIGH : LOW);
+  Monitor.println(on ? "ACK: LED is ON" : "ACK: LED is OFF");
+  return on;                      // sent back to the caller as the result
+}
+
+// Linux side calls: Bridge.call("echo", "hello")  ->  "STM32 reply: hello"
+String echo(String text) {
+  return String("STM32 reply: ") + text;
+}
 
 void setup() {
-  // Initialize standard hardware serial for debugging (optional)
-  Serial.begin(115200);
-
-  // Initialize the inter-processor RPMsg bridge to Linux
-  RPC.begin();
+  Bridge.begin();                 // start the link to the Linux side
+  Monitor.begin(115200);          // replaces Serial on the UNO Q
 
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
+
+  // Register functions the Linux side is allowed to call.
+  // provide_safe runs them on the main loop thread, so they can touch pins safely.
+  Bridge.provide_safe("set_led", set_led);
+  Bridge.provide_safe("echo", echo);
 }
 
 void loop() {
-  // Check for incoming commands or data from the Linux router/bridge
-  if (RPC.available()) {
-    String cmd = RPC.readStringUntil('\n');
-    cmd.trim();
-
-    if (cmd == "LED_ON") {
-      digitalWrite(LED_BUILTIN, HIGH);
-      RPC.println("ACK: LED is ON");
-    } else if (cmd == "LED_OFF") {
-      digitalWrite(LED_BUILTIN, LOW);
-      RPC.println("ACK: LED is OFF");
-    } else if (cmd.startsWith("ECHO:")) {
-      RPC.print("STM32 reply: ");
-      RPC.println(cmd.substring(5));
-    } else {
-      RPC.print("UNKNOWN_COMMAND: ");
-      RPC.println(cmd);
-    }
-  }
-
-  // Periodic heartbeat sent to Linux every 5 seconds
+  // Heartbeat every 5 s. notify() is fire-and-forget: no reply expected.
   static unsigned long lastBeat = 0;
   if (millis() - lastBeat > 5000) {
     lastBeat = millis();
-    RPC.println("PING from STM32");
+    Bridge.notify("heartbeat", lastBeat);
+    Monitor.println("PING from STM32");
   }
 }
