@@ -104,6 +104,17 @@ window.addEventListener('error', function (e) {
   .chip .st { color: var(--muted); }
   .hint { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
 
+  .board { background: rgba(255,255,255,0.03); border-radius: 8px; padding: 10px; }
+  .bdot { width: 10px; height: 10px; border-radius: 50%; background: #66717c; flex: none; }
+  .bdot[data-s="ok"] { background: var(--nominal); } .bdot[data-s="bad"] { background: var(--critical); } .bdot[data-s="sim"] { background: var(--info); }
+  .board input[type=text] { flex: 1; min-width: 0; font: 12px var(--font); color: var(--ink); background: rgba(0,0,0,0.3); border: 1px solid var(--panel-line); border-radius: 6px; padding: 7px 8px; }
+  .board button { width: auto; padding: 7px 12px; }
+  .lbl { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .board select, .board input[type=number] { font: 12px var(--font); color: var(--ink); background: rgba(0,0,0,0.3); border: 1px solid var(--panel-line); border-radius: 6px; padding: 5px 6px; width: 72px; }
+  .board select { width: auto; max-width: 150px; }
+  .verdict { font-size: 13px; margin-top: 6px; color: var(--muted); }
+  .rk { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; padding: 1px 6px; border-radius: 8px; margin-left: 6px; vertical-align: 1px; }
+  .rk[data-r="low"] { background: rgba(63,184,120,.2); color: #7fd6a4; } .rk[data-r="medium"] { background: rgba(229,180,43,.22); color: #f1cc63; } .rk[data-r="high"] { background: rgba(255,77,61,.25); color: #ff8a7d; }
   @media (max-width: 960px) {
     html, body { height: auto; }
     #stage { position: relative; height: 58vh; }
@@ -124,6 +135,19 @@ window.addEventListener('error', function (e) {
   <section>
     <h2>Districts</h2>
     <ul class="zones" id="zones"></ul>
+  </section>
+
+  <section>
+    <h2>Arduino UNO Q live sensor</h2>
+    <div class="board">
+      <div class="row"><span class="bdot" id="bdot" data-s="sim"></span><span id="bstatus">Sensor off (simulated quakes only)</span></div>
+      <div class="row"><label class="switch"><input type="checkbox" id="useBoard"><span class="track"></span>Read the real UNO Q</label></div>
+      <div class="row"><input type="text" id="boardUrl" placeholder="http://192.168.x.x:5000  (blank = this page's server)" aria-label="UNO Q address"><button id="boardTest">Test</button></div>
+      <div class="row"><label class="lbl">Shake lands in <select id="sensorZone"></select></label></div>
+      <div class="row"><label class="lbl">Medium at <input type="number" id="medT" value="1.5" step="0.1" min="0.1"> g</label><label class="lbl">High at <input type="number" id="highT" value="2.0" step="0.1" min="0.2"> g</label></div>
+      <div class="row"><label class="switch"><input type="checkbox" id="reqEvt"><span class="track"></span>Only when ml.cpp flags an event</label></div>
+      <div class="verdict" id="verdict">No verdict yet.</div>
+    </div>
   </section>
 
   <section>
@@ -1883,6 +1907,9 @@ window.addEventListener('error', function (e) {
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
 
+  const LEVEL_FROM_RISK = { low: 'nominal', medium: 'warning', high: 'critical' };
+  const RISK_FROM_LEVEL = { nominal: 'low', warning: 'medium', critical: 'high' };
+
   function damageFor(pga) {
     for (const [lim, label, mmi] of MMI_TABLE) if (pga < lim) return { label, mmi };
     return { label: 'Extreme', mmi: 'X+' };
@@ -1953,6 +1980,8 @@ window.addEventListener('error', function (e) {
       this.pending = [];
       this.lastEvent = null;
       this.auto = { on: false, next: 0 };
+      this.classifier = null;   // external risk classifier (the Arduino UNO Q)
+      this.epoch = 0;
       this._initState();
     }
 
@@ -2027,8 +2056,32 @@ window.addEventListener('error', function (e) {
     }
     autoRemaining() { return this.auto.on ? Math.max(0, this.auto.next - this.clock) : null; }
 
+    /** Plug in an external classifier. fn(payload) -> Promise<{risk:'low'|'medium'|'high', source, ms}>. */
+    setClassifier(fn) { this.classifier = fn || null; }
+
     _assess(ev, zoneId) {
+      const per = ev.perZone[zoneId];
+      if (!this.classifier) { this._applyAssess(ev, zoneId, null); return; }
+      const epoch = this.epoch;
+      const payload = {
+        event: ev.id, zone: zoneId, label: per.label, pga_g: +per.pga.toFixed(4),
+        sta_lta: per.trigger.index >= 0 ? +per.trigger.ratio.toFixed(2) : 0,
+        distance_km: +per.distanceKm.toFixed(2),
+        detect_ms: per.detectDelay === null ? null : Math.round(per.detectDelay * 1000)
+      };
+      Promise.resolve().then(() => this.classifier(payload))
+        .catch(() => ({ risk: RISK_FROM_LEVEL[per.level], source: 'fallback', ms: 0 }))
+        .then(r => { if (epoch === this.epoch) this._applyAssess(ev, zoneId, r); });
+    }
+
+    /** Apply the verdict: district alert level, then gate/bridge closures. */
+    _applyAssess(ev, zoneId, result) {
       const per = ev.perZone[zoneId], st = this.zones[zoneId], prev = st.level;
+      per.risk = null;
+      if (result && LEVEL_FROM_RISK[result.risk]) {
+        per.risk = result.risk; per.riskSource = result.source; per.riskMs = result.ms;
+        per.level = LEVEL_FROM_RISK[result.risk];
+      }
       let action = 'no action';
       if (per.level === 'critical') {
         st.level = 'critical'; st.until = Math.max(st.until, this.clock + CONFIG.holdCritical);
@@ -2044,9 +2097,14 @@ window.addEventListener('error', function (e) {
       // Structure-specific check: bridges are more fragile than road gates.
       Object.entries(this.topo.gates).forEach(([gid, gd]) => {
         if (!gd.connects.includes(zoneId)) return;
-        const limit = CONFIG.fragility[gd.type];
-        if (per.pga >= limit) {
-          const g = this.gates[gid];
+        const limit = CONFIG.fragility[gd.type], g = this.gates[gid];
+        if (per.risk) {
+          // Verdict from the board: MEDIUM closes the fragile bridges as a precaution, HIGH locks the district (all gates).
+          if (per.risk === 'medium' && gd.type === 'bridge') {
+            g.fragUntil = Math.max(g.fragUntil, this.clock + CONFIG.holdWarning);
+            g.fragReason = `${per.label} rated MEDIUM risk, precautionary bridge closure`;
+          }
+        } else if (per.pga >= limit) {
           g.fragUntil = Math.max(g.fragUntil, this.clock + CONFIG.holdWarning);
           g.fragReason = `${per.label} PGA ${per.pga.toFixed(3)} g exceeds ${gd.type} limit ${limit} g`;
         }
@@ -2105,6 +2163,7 @@ window.addEventListener('error', function (e) {
 
     /** Clear every alert and reopen every gate. */
     reset() {
+      this.epoch++;
       this.pending = [];
       Object.values(this.zones).forEach(st => {
         const prev = st.level;
@@ -2452,7 +2511,7 @@ window.addEventListener('error', function (e) {
   Object.values(city.zones).forEach(z => {
     const li = document.createElement('li');
     li.dataset.level = 'nominal';
-    li.innerHTML = `<span class="dot"></span><span><span class="zname">${z.label}</span><br><span class="zstate">Nominal</span></span><span class="zpga">PGA –</span>`;
+    li.innerHTML = `<span class="dot"></span><span><span class="zname">${z.label}</span><span class="rk" data-r="" hidden></span><br><span class="zstate">Nominal</span></span><span class="zpga">PGA –</span>`;
     zoneList.appendChild(li);
     zoneEls[z.id] = li;
 
@@ -2549,8 +2608,11 @@ window.addEventListener('error', function (e) {
   });
 
   engine.on('assessment', ({ ev, per, level, action }) => {
+    const rk = zoneEls[per.zone].querySelector('.rk');
+    if (per.risk) { rk.hidden = false; rk.dataset.r = per.risk; rk.textContent = per.risk.toUpperCase(); }
     if (per.pga < 0.02 && level === 'nominal') return; // keep the log readable
-    addLine(blocks[ev.id], `${per.label}: PGA ${g3(per.pga)} at ${per.distanceKm.toFixed(1)} km, ${per.damage.label} (MMI ${per.damage.mmi}), ${action}`, 'lv-' + level);
+    const who = per.risk ? `UNO Q rated ${per.risk.toUpperCase()}${per.riskSource === 'fallback' ? ' (board unreachable, on-screen fallback)' : ''}, ` : '';
+    addLine(blocks[ev.id], `${per.label}: PGA ${g3(per.pga)} at ${per.distanceKm.toFixed(1)} km, ${per.damage.label} (MMI ${per.damage.mmi}), ${who}${action}`, 'lv-' + level);
     zoneEls[per.zone].querySelector('.zpga').textContent = 'PGA ' + g3(per.pga);
     fx.markDamage(per.zone, per.pga);
   });
@@ -2582,9 +2644,96 @@ window.addEventListener('error', function (e) {
 
   engine.on('reset', () => {
     fx.reset();
-    Object.values(zoneEls).forEach(li => { li.querySelector('.zpga').textContent = 'PGA –'; });
+    Object.values(zoneEls).forEach(li => { li.querySelector('.zpga').textContent = 'PGA –'; li.querySelector('.rk').hidden = true; });
+    document.getElementById('verdict').textContent = 'No verdict yet.';
     newBlock('system', 'Manual reset', stamp());
   });
+
+  // ---------- UNO Q live sensor ----------
+  // Polls GET <board>/api/telemetry (app.py): {samples:[{timestamp, acceleration (g), threshold, event}], sensor_status}.
+  // Only samples newer than the last poll count. Their peak acceleration is rated LOW / MEDIUM / HIGH. A MEDIUM or HIGH reading fires an aftershock in the chosen district, and the city
+  // (district colors, gates, bridges) reacts to that rating.
+  const useBoard = document.getElementById('useBoard'), boardUrl = document.getElementById('boardUrl');
+  const bdot = document.getElementById('bdot'), bstatus = document.getElementById('bstatus'), verdictEl = document.getElementById('verdict');
+  const zoneSel = document.getElementById('sensorZone'), medT = document.getElementById('medT'), highT = document.getElementById('highT');
+  Object.values(city.zones).forEach(z => zoneSel.add(new Option(z.label, z.id)));
+  zoneSel.add(new Option('Auto: 2.0 g and up Northgate, else Main Campus', 'auto'), 0); zoneSel.value = 'auto';
+  const reqEvt = document.getElementById('reqEvt');
+  const setStatus = (st, t) => { bdot.dataset.s = st; bstatus.textContent = t; };
+  const base = () => boardUrl.value.trim().replace(/\/+$/, '');
+  const RANK = { low: 0, medium: 1, high: 2 };
+  const CLS = { low: 'nominal', medium: 'warning', high: 'critical' };
+  const POLL_MS = 200, RECENT = 25, COOLDOWN_S = 8;
+
+  // Absolute magnitude in g (a resting sensor reads about 1 g), so the thresholds sit above that.
+  const rate = peak => peak >= +highT.value ? 'high' : peak >= +medT.value ? 'medium' : 'low';
+
+  // Rules used for the other districts (and when the sensor is off): PGA bands from the simulation.
+  function onScreen(p) {
+    if (p.pga_g >= CFG.pgaCritical) return 'high';
+    if (p.pga_g >= CFG.pgaWarning && p.sta_lta >= 4) return 'medium';
+    return 'low';
+  }
+  let liveEvent = null;   // { id, zone, risk }: the aftershock fired by the physical sensor
+  engine.setClassifier(async p => {
+    const t0 = performance.now(); let risk, source;
+    if (liveEvent && p.event === liveEvent.id) {
+      // The shaken district uses the real sensor rating; neighbors follow the simulated decay but never exceed it.
+      if (p.zone === liveEvent.zone) { risk = liveEvent.risk; source = 'uno-q sensor'; }
+      else { risk = onScreen(p); if (RANK[risk] > RANK[liveEvent.risk]) risk = liveEvent.risk; source = 'uno-q sensor + simulated decay'; }
+    } else { risk = onScreen(p); source = 'on-screen'; }
+    verdictEl.innerHTML = `Last verdict: <b class="lv-${CLS[risk]}">${risk.toUpperCase()}</b> for ${p.label} (${source})`;
+    return { risk, source, ms: Math.round(performance.now() - t0) };
+  });
+
+  let polling = false, armed = true, calmSince = null, lastFire = -1e9, timer = null, lastTs = null, lastNewAt = 0;
+  const tsOf = x => Number(x.timestamp ?? x.ts ?? x.time ?? NaN);
+  async function pollOnce() {
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 1000);
+    try {
+      if (location.protocol === 'file:' && !base()) throw new Error('Enter the UNO Q address, e.g. http://192.168.1.50:5000');
+      const res = await fetch(base() + '/api/telemetry', { cache: 'no-store', signal: ctl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const samples = (Array.isArray(data) ? data : (data.samples || [])).filter(x => x && Number.isFinite(Number(x.acceleration)));
+      const ss = data && data.sensor_status, now = performance.now();
+      if (!samples.length) { setStatus('ok', 'UNO Q connected, waiting for samples from ml.cpp'); return; }
+      const newest = Math.max(...samples.map(tsOf));
+      let fresh;
+      if (!Number.isFinite(newest)) fresh = samples.slice(-5);                       // no timestamps: treat the tail as new
+      else if (lastTs === null) { fresh = []; lastTs = newest; lastNewAt = now; }     // first poll: skip the stored backlog
+      else { fresh = samples.filter(x => tsOf(x) > lastTs); lastTs = Math.max(lastTs, newest); }
+      if (fresh.length) lastNewAt = now;
+      if (now - lastNewAt > 3000) setStatus('bad', 'Connected, but no new samples. Is ml.cpp running?');
+      else setStatus('ok', 'UNO Q connected' + (ss ? ' · ' + (typeof ss === 'string' ? ss : JSON.stringify(ss)) : ''));
+      if (!fresh.length) return;
+      const peak = Math.max(...fresh.map(x => Number(x.acceleration)));
+      const anyEvt = fresh.some(x => x.event === true || x.event === 'true');
+      const risk = rate(peak);
+      if (!liveEvent || engine.clock - lastFire > 1.5) verdictEl.innerHTML = `Live: <b class="lv-${CLS[risk]}">${peak.toFixed(2)} g</b> (${risk.toUpperCase()}), ml.cpp event: ${anyEvt ? 'yes' : 'no'}`;
+      if (risk === 'low') { calmSince = calmSince ?? now; if (now - calmSince > 1500) armed = true; }
+      else {
+        calmSince = null;
+        if (armed && engine.clock - lastFire > COOLDOWN_S && (!reqEvt.checked || anyEvt)) {
+          armed = false; lastFire = engine.clock;
+          let zone = zoneSel.value;
+          if (zone === 'auto') zone = peak >= 2.0 && city.zones.zone_northgate ? 'zone_northgate' : (city.zones.zone_campus ? 'zone_campus' : Object.keys(city.zones)[0]);
+          const ev = engine.trigger(zone, risk === 'high' ? 'severe' : 'moderate');
+          liveEvent = { id: ev.id, zone, risk };
+        }
+      }
+    } catch (e) {
+      setStatus('bad', /address/.test(e.message) ? e.message : 'Cannot read the UNO Q. Check the address, same Wi-Fi, and that app.py is running.');
+    } finally { clearTimeout(to); }
+  }
+  function loop() { if (!polling) return; pollOnce().finally(() => { timer = setTimeout(loop, POLL_MS); }); }
+  function setPolling(on) {
+    polling = on; clearTimeout(timer);
+    if (on) { setStatus('sim', 'Contacting UNO Q…'); armed = true; lastTs = null; loop(); }
+    else { liveEvent = null; setStatus('sim', 'Sensor off (simulated quakes only)'); }
+  }
+  useBoard.addEventListener('change', () => setPolling(useBoard.checked));
+  document.getElementById('boardTest').addEventListener('click', () => { if (!useBoard.checked) { useBoard.checked = true; setPolling(true); } else pollOnce(true); });
 
   // ---------- Main loop ----------
   const clock = new THREE.Clock();
