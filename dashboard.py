@@ -9,23 +9,23 @@ app = Flask(__name__)
 telemetry = deque(maxlen=240)
 
 telemetry_lock = Lock()
-sensor_status = "Waiting for ml.cpp telemetry"
+sensor_status = "Waiting for UNO Q telemetry"
 
 TABS = {
     "overview": {
         "label": "Overview",
         "title": "Overview",
-        "description": "A quick look at how things are going.",
+        "description": "Live Dual-MPU6050 Seismic Fingerprint & Vector Embedding Monitor.",
     },
     "analytics": {
         "label": "Analytics",
         "title": "Analytics",
-        "description": "Explore activity and performance at a glance.",
+        "description": "Explore embedding similarity metrics and magnitude tiers.",
     },
     "reports": {
         "label": "Reports",
         "title": "Reports",
-        "description": "Your latest reports are collected here.",
+        "description": "Your latest seismic event reports are collected here.",
     },
     "map": {
         "label": "Map",
@@ -39,14 +39,13 @@ TABS = {
     },
 }
 
-
 PAGE = """
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ tab.title }} &middot; Aftershock</title>
+  <title>{{ tab.title }} &middot; Aftershock</title>
   <script>
     const preferredTheme = localStorage.getItem("aftershock-theme");
     document.documentElement.dataset.theme = preferredTheme ||
@@ -155,7 +154,7 @@ PAGE = """
     .card, .panel { border: 1px solid var(--border); border-radius: 15px; background: var(--surface); box-shadow: 0 5px 18px #1725540a; }
     .card { padding: 22px; }
     .card-label { color: var(--muted); font-size: 14px; font-weight: 600; }
-    .card-value { margin: 14px 0 5px; font-size: 30px; font-weight: 750; letter-spacing: -.04em; }
+    .card-value { margin: 14px 0 5px; font-size: 28px; font-weight: 750; letter-spacing: -.04em; }
     .card-note { color: var(--positive); font-size: 13px; font-weight: 600; }
     .panel { padding: 24px; }
     .panel h2 { margin: 0 0 18px; font-size: 18px; }
@@ -190,13 +189,6 @@ PAGE = """
       .cards { grid-template-columns: 1fr; gap: 12px; }
       .card, .panel { padding: 19px; }
     }
-    @media (max-width: 430px) {
-      .topbar { align-items: flex-start; }
-      .topbar-actions { gap: 8px; }
-      .theme-toggle { padding-inline: 10px; }
-      .crumb { max-width: 100px; line-height: 1.5; }
-      .activity { grid-template-columns: 1fr; gap: 3px; }
-    }
   </style>
 </head>
 <body>
@@ -224,31 +216,49 @@ PAGE = """
       <h1>{{ tab.title }}</h1>
       <p class="description">{{ tab.description }}</p>
       {% if active_tab == "overview" %}
+        <div class="cards">
+          <div class="card">
+            <div class="card-label">Magnitude Tier</div>
+            <div class="card-value" id="card-magnitude">BASELINE</div>
+            <div class="card-note" id="card-status">Vector DB Ready</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Waveform Shape Similarity</div>
+            <div class="card-value" id="card-cosine">0.00</div>
+            <div class="card-note">Cosine Similarity</div>
+          </div>
+          <div class="card">
+            <div class="card-label">Confirmed Shakes</div>
+            <div class="card-value" id="card-events">0</div>
+            <div class="card-note">Active buffer window</div>
+          </div>
+        </div>
         <section class="panel" aria-labelledby="plot-title">
           <div class="plot-toolbar">
             <div>
-              <h2 id="plot-title">Acceleration monitor</h2>
-              <div class="plot-status" id="plot-status">Waiting for UNO Q telemetry</div>
+              <h2 id="plot-title">Seismic Fingerprint & Peak Acceleration</h2>
+              <div class="plot-status" id="plot-status">Waiting for UNO Q embedding stream</div>
             </div>
             <label class="control" for="threshold-input">
-              Threshold (g)
-              <input id="threshold-input" type="number" min="0.01" max="100" step="0.01" value="1.50">
+              Threshold
+              <input id="threshold-input" type="number" min="0.1" max="10" step="0.1" value="1.80">
             </label>
           </div>
           <div class="plot-wrap">
-            <canvas id="acceleration-plot" aria-label="Acceleration plot with detection threshold and event markers"></canvas>
-            <div class="plot-empty" id="plot-empty">Waiting for acceleration samples...</div>
+            <canvas id="acceleration-plot" aria-label="Peak acceleration plot with magnitude thresholds"></canvas>
+            <div class="plot-empty" id="plot-empty">Waiting for sensor embeddings...</div>
           </div>
           <div class="plot-legend" aria-label="Plot legend">
-            <span class="legend-item" style="--legend-color:#5146e5">Acceleration</span>
-            <span class="legend-item" style="--legend-color:#e07a22">Detection threshold</span>
-            <span class="legend-item legend-event" style="--legend-color:#d43d51">Detected event</span>
+            <span class="legend-item" style="--legend-color:#5146e5">Peak Acceleration (m/s^2)</span>
+            <span class="legend-item" style="--legend-color:#087a55">RMS Vibration Energy</span>
+            <span class="legend-item" style="--legend-color:#e07a22">Medium Threshold</span>
+            <span class="legend-item legend-event" style="--legend-color:#d43d51">Shake Event</span>
           </div>
         </section>
       {% elif active_tab == "analytics" %}
         <section class="panel placeholder">
-          <h2>Analytics snapshot</h2>
-          <p>Your analytics workspace is ready. Connect a data source to replace these sample dashboard metrics with live data.</p>
+          <h2>Embedding Analytics</h2>
+          <p>Real-time telemetry stream processes through 16-D vector projections and cosine similarity matching.</p>
         </section>
       {% elif active_tab == "reports" %}
         <section class="panel">
@@ -296,6 +306,11 @@ PAGE = """
       const plotEmpty = document.getElementById("plot-empty");
       const plotStatus = document.getElementById("plot-status");
       const thresholdInput = document.getElementById("threshold-input");
+      const cardMagnitude = document.getElementById("card-magnitude");
+      const cardStatus = document.getElementById("card-status");
+      const cardCosine = document.getElementById("card-cosine");
+      const cardEvents = document.getElementById("card-events");
+
       let samples = [];
       let usingDemoData = true;
 
@@ -316,9 +331,10 @@ PAGE = """
         plotEmpty.hidden = true;
 
         const values = samples.map((sample) => sample.acceleration);
-        const threshold = Number(thresholdInput.value) || 1.5;
-        const maximum = Math.max(threshold * 1.15, ...values, 0.1);
-        const minimum = Math.min(-0.1, ...values);
+        const rmsValues = samples.map((sample) => sample.rms || 0);
+        const threshold = Number(thresholdInput.value) || 1.8;
+        const maximum = Math.max(threshold * 1.25, ...values, ...rmsValues, 6.0);
+        const minimum = Math.min(-0.05, ...values);
         const x = (index) => index * width / Math.max(1, samples.length - 1);
         const y = (value) => height - (value - minimum) * height / (maximum - minimum);
 
@@ -332,6 +348,7 @@ PAGE = """
           context.stroke();
         }
 
+        // Threshold Line
         context.strokeStyle = "#e07a22";
         context.setLineDash([6, 5]);
         context.beginPath();
@@ -340,8 +357,22 @@ PAGE = """
         context.stroke();
         context.setLineDash([]);
 
+        // RMS Line
+        if (samples.some((s) => s.rms !== undefined)) {
+          context.strokeStyle = "#087a55";
+          context.lineWidth = 1.5;
+          context.beginPath();
+          samples.forEach((sample, index) => {
+            const pointX = x(index);
+            const pointY = y(sample.rms || 0);
+            index ? context.lineTo(pointX, pointY) : context.moveTo(pointX, pointY);
+          });
+          context.stroke();
+        }
+
+        // Peak Acceleration Line
         context.strokeStyle = "#5146e5";
-        context.lineWidth = 2;
+        context.lineWidth = 2.2;
         context.beginPath();
         samples.forEach((sample, index) => {
           const pointX = x(index);
@@ -350,11 +381,12 @@ PAGE = """
         });
         context.stroke();
 
+        // Event Markers
         context.fillStyle = "#d43d51";
         samples.forEach((sample, index) => {
           if (!sample.event) return;
           context.beginPath();
-          context.arc(x(index), y(sample.acceleration), 4, 0, Math.PI * 2);
+          context.arc(x(index), y(sample.acceleration), 4.5, 0, Math.PI * 2);
           context.fill();
         });
       }
@@ -364,12 +396,11 @@ PAGE = """
         const seconds = Date.now() / 1000;
         const event = Math.sin(seconds / 8) > 0.96;
         const acceleration = event
-          ? 1.9 + Math.sin(seconds * 16) * 0.35
-          : 0.25 + Math.sin(seconds * 4) * 0.08;
-        samples.push({ acceleration, event });
+          ? 3.5 + Math.sin(seconds * 16) * 1.2
+          : 0.15 + Math.sin(seconds * 4) * 0.05;
+        samples.push({ acceleration, rms: acceleration * 0.4, cosine: 0.94, event });
         samples = samples.slice(-180);
-        usingDemoData = true;
-        plotStatus.textContent = "Demo stream - waiting for UNO Q telemetry";
+        plotStatus.textContent = "Demo stream - waiting for UNO Q embeddings";
         drawPlot();
       }
 
@@ -381,21 +412,26 @@ PAGE = """
           if (payload.samples.length) {
             samples = payload.samples;
             usingDemoData = false;
-            plotStatus.textContent = `UNO Q connected - ${payload.samples.length} samples`;
+            const latest = samples[samples.length - 1];
+            const eventCount = samples.filter((s) => s.event).length;
+
+            cardMagnitude.textContent = latest.magnitude || "BASELINE";
+            cardStatus.textContent = payload.sensor_status || "Vector DB Active";
+            cardCosine.textContent = latest.cosine !== undefined ? Number(latest.cosine).toFixed(2) : "0.00";
+            cardEvents.textContent = String(eventCount);
+            plotStatus.textContent = `${payload.sensor_status} (${payload.samples.length} samples)`;
             drawPlot();
-          } else if (!usingDemoData) {
-            plotStatus.textContent = "Waiting for UNO Q telemetry";
+          } else {
+            plotStatus.textContent = payload.sensor_status || "Waiting for telemetry";
+            cardStatus.textContent = payload.sensor_status || "Waiting for telemetry";
           }
         } catch (error) {
           plotStatus.textContent = "Telemetry connection unavailable";
         }
       }
 
-      thresholdInput.addEventListener("input", drawPlot);
       window.addEventListener("resize", drawPlot);
-      setInterval(() => {
-        if (!usingDemoData) readTelemetry();
-      }, 1000);
+      setInterval(readTelemetry, 500);
       setInterval(addDemoSample, 250);
       readTelemetry();
     </script>
@@ -404,36 +440,23 @@ PAGE = """
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
       const map = L.map("map").setView([20, 0], 2);
-
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19
-      }).addTo(map);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
     </script>
   {% endif %}
 </body>
 </html>
 """
 
-
 @app.route("/")
 def index():
     return show_tab("overview")
-
 
 @app.route("/<tab_name>")
 def show_tab(tab_name):
     tab = TABS.get(tab_name)
     if tab is None:
         abort(404)
-
-    return render_template_string(
-        PAGE,
-        tabs=TABS,
-        active_tab=tab_name,
-        tab=tab,
-    )
-
+    return render_template_string(PAGE, tabs=TABS, active_tab=tab_name, tab=tab)
 
 @app.get("/api/telemetry")
 def get_telemetry():
@@ -441,7 +464,6 @@ def get_telemetry():
         samples = list(telemetry)
         status = sensor_status
     return jsonify({"samples": samples, "sensor_status": status})
-
 
 @app.post("/api/telemetry")
 def add_telemetry():
@@ -452,33 +474,28 @@ def add_telemetry():
 
     try:
         acceleration = float(payload["acceleration"])
-        threshold = float(payload.get("threshold", 1.5))
-        event = bool(payload.get("event", acceleration >= threshold))
+        threshold = float(payload.get("threshold", 1.8))
+        event = bool(payload.get("event", False))
+        rms = float(payload.get("rms", 0.0))
+        cosine = float(payload.get("cosine", 0.0))
+        magnitude = str(payload.get("magnitude", "BASELINE"))
+        status_msg = str(payload.get("status", "Vector DB Stream Active"))
     except (KeyError, TypeError, ValueError):
-        return jsonify({
-            "error": "acceleration is required and must be numeric; threshold must be numeric",
-        }), 400
-
-    if not all(map(lambda value: value == value and abs(value) != float("inf"), (acceleration, threshold))):
-        return jsonify({"error": "acceleration and threshold must be finite"}), 400
-    if threshold <= 0:
-        return jsonify({"error": "threshold must be greater than zero"}), 400
+        return jsonify({"error": "Invalid numeric or string payload"}), 400
 
     sample = {
         "timestamp": time(),
         "acceleration": acceleration,
         "threshold": threshold,
         "event": event,
+        "rms": rms,
+        "cosine": cosine,
+        "magnitude": magnitude,
     }
     with telemetry_lock:
         telemetry.append(sample)
-        sensor_status = "Receiving telemetry from ml.cpp"
+        sensor_status = status_msg
     return jsonify(sample), 201
 
-
 if __name__ == "__main__":
-    app.run(
-        host=os.getenv("AFTERSHOCK_HOST", "0.0.0.0"),
-        port=int(os.getenv("AFTERSHOCK_PORT", "5000")),
-        debug=False,
-    )
+    app.run(host="0.0.0.0", port=5000, debug=False)

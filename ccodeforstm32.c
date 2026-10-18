@@ -2,97 +2,115 @@
 #include <Wire.h>
 #include <Arduino_RouterBridge.h>
 
-constexpr uint8_t MPU1_ADDR = 0x68; // AD0 -> GND
-constexpr uint8_t MPU2_ADDR = 0x69; // AD0 -> 3.3V
-constexpr unsigned long SAMPLE_INTERVAL_MS = 20; // 50 Hz
+constexpr uint8_t MPU1_ADDR = 0x68;
+constexpr uint8_t MPU2_ADDR = 0x69;
+constexpr unsigned long SAMPLE_INTERVAL_MS = 20;
 
-void writeMPURegister(uint8_t addr, uint8_t reg, uint8_t val) {
-  Wire.beginTransmission(addr);
+void writeMPURegister(uint8_t address, uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(address);
   Wire.write(reg);
-  Wire.write(val);
+  Wire.write(value);
   Wire.endTransmission();
 }
 
-bool initMPU(uint8_t addr) {
-  Wire.beginTransmission(addr);
+bool initMPU(uint8_t address) {
+  Wire.beginTransmission(address);
   if (Wire.endTransmission() != 0) {
-    return false; // Sensor not responding at this address
+    return false;
   }
-  writeMPURegister(addr, 0x6B, 0x00); // Wake up MPU6050
-  writeMPURegister(addr, 0x1A, 0x03); // Low-pass filter
-  writeMPURegister(addr, 0x19, 0x13); // Sample rate divider: 50 Hz
-  writeMPURegister(addr, 0x1C, 0x00); // Accel range: +/- 2g
+
+  writeMPURegister(address, 0x6B, 0x00);
+  writeMPURegister(address, 0x1A, 0x03);
+  writeMPURegister(address, 0x19, 0x13);
+  writeMPURegister(address, 0x1C, 0x00);
   return true;
 }
 
-bool readMPU(uint8_t addr, float &ax, float &ay, float &az) {
-  Wire.beginTransmission(addr);
-  Wire.write(0x3B); // Accel Xout_H
+bool readMPU(uint8_t address, float &ax, float &ay, float &az) {
+  Wire.beginTransmission(address);
+  Wire.write(0x3B);
   if (Wire.endTransmission(false) != 0) {
     return false;
   }
 
-  Wire.requestFrom(addr, (uint8_t)6, (uint8_t)true);
-  if (Wire.available() == 6) {
-    int16_t rawX = (Wire.read() << 8) | Wire.read();
-    int16_t rawY = (Wire.read() << 8) | Wire.read();
-    int16_t rawZ = (Wire.read() << 8) | Wire.read();
-
-    constexpr float scale = 9.80665f / 16384.0f;
-    ax = rawX * scale;
-    ay = rawY * scale;
-    az = rawZ * scale;
-    return true;
+  Wire.requestFrom(address, static_cast<uint8_t>(6), static_cast<uint8_t>(true));
+  if (Wire.available() != 6) {
+    return false;
   }
-  return false;
+
+  const int16_t rawX = (Wire.read() << 8) | Wire.read();
+  const int16_t rawY = (Wire.read() << 8) | Wire.read();
+  const int16_t rawZ = (Wire.read() << 8) | Wire.read();
+  constexpr float scale = 9.80665f / 16384.0f;
+  ax = rawX * scale;
+  ay = rawY * scale;
+  az = rawZ * scale;
+  return true;
 }
 
-// Alert trigger called by Linux when an aftershock is confirmed
+bool set_magnitude_led(String magnitude) {
+  uint8_t red = 0;
+  uint8_t green = 0;
+  uint8_t blue = 0;
+
+  if (magnitude == "LOW") {
+    red = 255;
+    green = 255;
+  } else if (magnitude == "MEDIUM") {
+    red = 255;
+    green = 128;
+  } else if (magnitude == "HIGH") {
+    red = 255;
+  } else {
+    green = 255;
+  }
+
+  rgbLedWrite(RGB_BUILTIN, red, green, blue);
+  return true;
+}
+
 bool trigger_alert(bool active) {
-  digitalWrite(LED_BUILTIN, active ? HIGH : LOW);
+  set_magnitude_led(active ? "HIGH" : "BASELINE");
   return active;
 }
 
 void setup() {
   Bridge.begin();
   Wire.begin();
-  Wire.setClock(400000); // 400 kHz Fast I2C to read both sensors quickly
+  Wire.setClock(400000);
   Monitor.begin(115200);
-
   pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
+  rgbLedWrite(RGB_BUILTIN, 0, 255, 0);
 
   Bridge.provide_safe("trigger_alert", trigger_alert);
+  Bridge.provide_safe("set_magnitude_led", set_magnitude_led);
 
   while (!initMPU(MPU1_ADDR)) {
     Monitor.println("MPU1 (0x68) not detected. Retrying in 1s...");
     delay(1000);
   }
-  Monitor.println("MPU1 (0x68) initialized.");
-
   while (!initMPU(MPU2_ADDR)) {
-    Monitor.println("MPU2 (0x69) not detected. Check AD0 -> 3.3V. Retrying in 1s...");
+    Monitor.println("MPU2 (0x69) not detected. Retrying in 1s...");
     delay(1000);
   }
-  Monitor.println("MPU2 (0x69) initialized.");
 }
 
 void loop() {
   static unsigned long lastSample = 0;
-  unsigned long now = millis();
+  const unsigned long now = millis();
+  if (now - lastSample < SAMPLE_INTERVAL_MS) {
+    return;
+  }
+  lastSample = now;
 
-  if (now - lastSample >= SAMPLE_INTERVAL_MS) {
-    lastSample = now;
-
-    float ax1 = 0, ay1 = 0, az1 = 0;
-    float ax2 = 0, ay2 = 0, az2 = 0;
-
-    bool ok1 = readMPU(MPU1_ADDR, ax1, ay1, az1);
-    bool ok2 = readMPU(MPU2_ADDR, ax2, ay2, az2);
-
-    if (ok1 && ok2) {
-      // Send all 6 values in a single synchronized frame
-      Bridge.notify("accel_sample", ax1, ay1, az1, ax2, ay2, az2);
-    }
+  float ax1 = 0;
+  float ay1 = 0;
+  float az1 = 0;
+  float ax2 = 0;
+  float ay2 = 0;
+  float az2 = 0;
+  if (readMPU(MPU1_ADDR, ax1, ay1, az1) &&
+      readMPU(MPU2_ADDR, ax2, ay2, az2)) {
+    Bridge.notify("accel_sample", ax1, ay1, az1, ax2, ay2, az2);
   }
 }
