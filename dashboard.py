@@ -1,4 +1,5 @@
 from collections import deque
+import os
 from threading import Lock
 from time import time
 
@@ -42,7 +43,7 @@ PAGE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ tab.title }} · Aftershock</title>
+<title>{{ tab.title }} &middot; Aftershock</title>
   <script>
     const preferredTheme = localStorage.getItem("aftershock-theme");
     document.documentElement.dataset.theme = preferredTheme ||
@@ -199,7 +200,7 @@ PAGE = """
   <a class="skip-link" href="#main-content">Skip to main content</a>
   <div class="layout">
     <aside aria-label="Sidebar">
-      <p class="brand"><span>◆</span> Aftershock</p>
+      <p class="brand"><span>*</span> Aftershock</p>
       <p class="nav-label">Workspace</p>
       <nav aria-label="Dashboard tabs">
         {% for key, item in tabs.items() %}
@@ -212,7 +213,7 @@ PAGE = """
         <div class="crumb" aria-label="Breadcrumb">Workspace / {{ tab.label }}</div>
         <div class="topbar-actions">
           <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to dark mode" aria-pressed="false">
-            <span aria-hidden="true">◐</span><span id="theme-label">Dark mode</span>
+            <span aria-hidden="true">[ ]</span><span id="theme-label">Dark mode</span>
           </button>
           <div class="avatar" role="img" aria-label="Jordan Davis profile">JD</div>
         </div>
@@ -365,7 +366,7 @@ PAGE = """
         samples.push({ acceleration, event });
         samples = samples.slice(-180);
         usingDemoData = true;
-        plotStatus.textContent = "Demo stream — waiting for UNO Q telemetry";
+        plotStatus.textContent = "Demo stream - waiting for UNO Q telemetry";
         drawPlot();
       }
 
@@ -377,7 +378,7 @@ PAGE = """
           if (payload.samples.length) {
             samples = payload.samples;
             usingDemoData = false;
-            plotStatus.textContent = `UNO Q connected — ${payload.samples.length} samples`;
+            plotStatus.textContent = `UNO Q connected - ${payload.samples.length} samples`;
             drawPlot();
           } else if (!usingDemoData) {
             plotStatus.textContent = "Waiting for UNO Q telemetry";
@@ -470,4 +471,8 @@ def add_telemetry():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(
+        host=os.getenv("AFTERSHOCK_HOST", "0.0.0.0"),
+        port=int(os.getenv("AFTERSHOCK_PORT", "5000")),
+        debug=False,
+    )

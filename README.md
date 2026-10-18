@@ -11,7 +11,41 @@ python -m pip install -r requirements.txt
 python dashboard.py
 ```
 
-Open `http://127.0.0.1:5000`. The Overview page includes a computer plot of acceleration, a configurable detection threshold, and event markers. Until telemetry arrives, it displays a clearly labeled demo stream.
+Open `http://127.0.0.1:5000` on the UNO Q itself. The Overview page includes a
+computer plot of acceleration, a configurable detection threshold, and event
+markers. Until telemetry arrives, it displays a clearly labeled demo stream.
+
+## Accessing the dashboard from another laptop
+
+The dashboard listens on all UNO Q network interfaces by default. Find the
+UNO Q's LAN/Wi-Fi address on its Debian terminal:
+
+```bash
+hostname -I
+```
+
+If it prints `192.168.1.42`, open this URL from another laptop connected to the
+same network:
+
+```text
+http://192.168.1.42:5000
+```
+
+Use the UNO Q's current IP address, not `127.0.0.1`. The IP may change after
+reconnecting to Wi-Fi, so reserve an address in the router or configure a
+static address if this is a permanent setup.
+
+For a laptop on a different network, a private address such as `192.168.x.x`
+is not reachable directly. Use a VPN/mesh VPN (for example, Tailscale or
+WireGuard) on both devices, then open the UNO Q's VPN address:
+
+```text
+http://<UNO-Q-VPN-IP>:5000
+```
+
+Do not expose Flask's development server directly to the public Internet with
+router port forwarding. If public access is required, put the dashboard behind
+an authenticated production reverse proxy and HTTPS.
 
 ## Sending UNO Q telemetry
 
@@ -25,7 +59,11 @@ curl -X POST http://127.0.0.1:5000/api/telemetry \
 
 `acceleration` and `threshold` are measured in g. `event` is optional; when omitted, the server marks the sample as an event when acceleration is at or above the threshold. The latest 240 samples are retained in memory.
 
-To access the dashboard from another computer on the same network, change the `app.run` call in `dashboard.py` to use `host="0.0.0.0"`, then browse to `http://<UNO-Q-IP>:5000`.
+To override the default listener or port:
+
+```bash
+AFTERSHOCK_HOST=0.0.0.0 AFTERSHOCK_PORT=5000 python dashboard.py
+```
 
 ## Debian ML monitor
 
@@ -34,7 +72,7 @@ To access the dashboard from another computer on the same network, change the `a
 ```bash
 sudo apt update
 sudo apt install -y g++
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic ml.cpp -o aftershock_ml
+make
 ./aftershock_ml --seconds 15
 ```
 
@@ -43,9 +81,11 @@ The program runs continuously when `--seconds` is omitted and stops with
 accelerometer data:
 
 ```bash
-./aftershock_ml --event --seconds 15
+make event
 ```
 
 The sensor input and inference function are isolated in `ml.cpp` so they can
 be replaced with the UNO Q sensor and deployed model without changing the
 sampling and temporal tracking logic.
+
+Use `make clean` to remove the compiled executable.
