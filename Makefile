@@ -1,20 +1,18 @@
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic
+LDLIBS ?= -lcurl
 TARGET := aftershock_ml
 SOURCE := ml.cpp
 
-.PHONY: all run event clean
+.PHONY: all run clean
 
 all: $(TARGET)
 
 $(TARGET): $(SOURCE)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $< -o $@ $(LDLIBS)
 
 run: $(TARGET)
 	./$(TARGET)
-
-event: $(TARGET)
-	./$(TARGET) --event --seconds 15
 
 clean:
 	$(RM) $(TARGET)

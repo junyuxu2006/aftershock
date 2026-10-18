@@ -7,7 +7,9 @@ from flask import Flask, abort, jsonify, render_template_string, request
 
 app = Flask(__name__)
 telemetry = deque(maxlen=240)
+
 telemetry_lock = Lock()
+sensor_status = "Waiting for ml.cpp telemetry"
 
 TABS = {
     "overview": {
@@ -36,6 +38,7 @@ TABS = {
         "description": "Manage your dashboard preferences.",
     },
 }
+
 
 PAGE = """
 <!doctype html>
@@ -436,11 +439,13 @@ def show_tab(tab_name):
 def get_telemetry():
     with telemetry_lock:
         samples = list(telemetry)
-    return jsonify({"samples": samples})
+        status = sensor_status
+    return jsonify({"samples": samples, "sensor_status": status})
 
 
 @app.post("/api/telemetry")
 def add_telemetry():
+    global sensor_status
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"error": "Request body must be a JSON object"}), 400
@@ -467,6 +472,7 @@ def add_telemetry():
     }
     with telemetry_lock:
         telemetry.append(sample)
+        sensor_status = "Receiving telemetry from ml.cpp"
     return jsonify(sample), 201
 
 

@@ -65,6 +65,48 @@ To override the default listener or port:
 AFTERSHOCK_HOST=0.0.0.0 AFTERSHOCK_PORT=5000 python dashboard.py
 ```
 
+## Shared MPU6050 telemetry
+
+`ml.cpp` is the single MPU6050 reader. It reads both sensors at 50 Hz, runs
+the detector, and publishes the exact selected sensor reading to the
+dashboard. This prevents the C++ program and Flask from performing separate
+I2C reads at different times. The dashboard only stores and displays the
+samples received from `ml.cpp`.
+
+The setup expects sensor `0x68` with `AD0` connected to GND and sensor `0x69`
+with `AD0` connected to 3.3V. Install the I2C tools and C++ HTTP library on
+the UNO Q:
+
+```bash
+sudo apt install -y g++ make libcurl4-openssl-dev i2c-tools
+python3 -m pip install -r requirements.txt
+sudo i2cdetect -y 1
+```
+
+Start the dashboard first:
+
+```bash
+python dashboard.py
+```
+
+Then build and start the shared reader:
+
+```bash
+make
+./aftershock_ml
+```
+
+The dashboard plots the larger total acceleration from either sensor, in `g`,
+and marks values at or above `1.5g` as events. If the dashboard runs on another
+computer, set its URL before starting the reader:
+
+```bash
+AFTERSHOCK_TELEMETRY_URL=http://<dashboard-ip>:5000/api/telemetry ./aftershock_ml
+```
+
+Override the I2C bus or sensor addresses with `MPU6050_I2C_BUS`,
+`MPU6050_I2C_ADDRESS_1`, and `MPU6050_I2C_ADDRESS_2`.
+
 ## Debian ML monitor
 
 `ml.cpp` is a standalone C++17 program and does not require Arduino libraries:
@@ -77,15 +119,25 @@ make
 ```
 
 The program runs continuously when `--seconds` is omitted and stops with
-`Ctrl-C`. Use `--event` to exercise the sustained-event alert using simulated
-accelerometer data:
+`Ctrl-C`. The program reads a real MPU6050 over Linux I2C. Install the I2C tools and
+verify that the sensor is visible:
 
 ```bash
-make event
+sudo apt install -y i2c-tools
+sudo i2cdetect -y 1
+make
+./aftershock_ml --seconds 15
 ```
 
-The sensor input and inference function are isolated in `ml.cpp` so they can
-be replaced with the UNO Q sensor and deployed model without changing the
-sampling and temporal tracking logic.
+The default bus is `/dev/i2c-1` and the default MPU6050 address is `0x68`.
+For a sensor wired to address `0x69`, run:
+
+```bash
+MPU6050_I2C_ADDRESS=0x69 ./aftershock_ml
+```
+
+Set `MPU6050_I2C_BUS` if the sensor is on another I2C bus. The sensor input
+and inference function are isolated in `ml.cpp`, so the deployed model can be
+added without changing the sampling and temporal tracking logic.
 
 Use `make clean` to remove the compiled executable.
